@@ -17,6 +17,7 @@ from app.indicators.volatility_indices import (
     OVXIndicator,
     GVZIndicator,
 )
+from app.indicators.rsi import RSIIndicator
 
 __all__ = [
     "BaseIndicatorProcessor",
@@ -32,4 +33,5 @@ __all__ = [
     "VXDIndicator",
     "OVXIndicator",
     "GVZIndicator",
+    "RSIIndicator",
 ]

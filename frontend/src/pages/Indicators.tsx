@@ -40,19 +40,27 @@ const typeConfig: Record<string, { label: string; color: string; bg: string; ico
   volatility: { label: '波动率', color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.1)', icon: Gauge },
 };
 
+// label 字段仅作后备；渲染时优先使用 API 返回的 grade_label
 const levelConfig: Record<string, { label: string; color: string; bg: string }> = {
-  extreme_fear: { label: '极度恐惧', color: '#dc2626', bg: 'rgba(220, 38, 38, 0.1)' },
-  fear: { label: '恐惧', color: '#ea580c', bg: 'rgba(234, 88, 12, 0.1)' },
-  neutral: { label: '中性', color: '#6b7280', bg: 'rgba(107, 114, 128, 0.1)' },
-  greed: { label: '贪婪', color: '#22c55e', bg: 'rgba(34, 197, 94, 0.1)' },
+  // Fear & Greed 指数
+  extreme_fear:  { label: '极度恐惧', color: '#dc2626', bg: 'rgba(220, 38, 38, 0.1)' },
+  fear:          { label: '恐惧',     color: '#ea580c', bg: 'rgba(234, 88, 12, 0.1)' },
+  neutral:       { label: '中性',     color: '#6b7280', bg: 'rgba(107, 114, 128, 0.1)' },
+  greed:         { label: '贪婪',     color: '#22c55e', bg: 'rgba(34, 197, 94, 0.1)' },
   extreme_greed: { label: '极度贪婪', color: '#16a34a', bg: 'rgba(22, 163, 74, 0.1)' },
-  very_low: { label: '极度低估', color: '#16a34a', bg: 'rgba(22, 163, 74, 0.1)' },
-  low: { label: '低估', color: '#22c55e', bg: 'rgba(34, 197, 94, 0.1)' },
-  medium_low: { label: '偏低', color: '#84cc16', bg: 'rgba(132, 204, 22, 0.1)' },
-  medium: { label: '合理', color: '#6b7280', bg: 'rgba(107, 114, 128, 0.1)' },
-  medium_high: { label: '偏高', color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.1)' },
-  high: { label: '高估', color: '#ef4444', bg: 'rgba(239, 68, 68, 0.1)' },
-  very_high: { label: '极度高估', color: '#dc2626', bg: 'rgba(220, 38, 38, 0.1)' },
+  // MA200 偏离度
+  very_low:    { label: '极度低估', color: '#16a34a', bg: 'rgba(22, 163, 74, 0.1)' },
+  low:         { label: '低估',     color: '#22c55e', bg: 'rgba(34, 197, 94, 0.1)' },
+  medium_low:  { label: '偏低',     color: '#84cc16', bg: 'rgba(132, 204, 22, 0.1)' },
+  medium:      { label: '合理',     color: '#6b7280', bg: 'rgba(107, 114, 128, 0.1)' },
+  medium_high: { label: '偏高',     color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.1)' },
+  high:        { label: '高估',     color: '#ef4444', bg: 'rgba(239, 68, 68, 0.1)' },
+  very_high:   { label: '极度高估', color: '#dc2626', bg: 'rgba(220, 38, 38, 0.1)' },
+  // 波动率指数（VIX / VXN / VXD / OVX / GVZ）
+  calm:     { label: '极度平静', color: '#22c55e', bg: 'rgba(34, 197, 94, 0.1)' },
+  normal:   { label: '正常波动', color: '#6b7280', bg: 'rgba(107, 114, 128, 0.1)' },
+  elevated: { label: '波动加剧', color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.1)' },
+  panic:    { label: '极度恐慌', color: '#dc2626', bg: 'rgba(220, 38, 38, 0.1)' },
 };
 
 export default function Indicators() {
@@ -301,7 +309,7 @@ export default function Indicators() {
                               color: level.color,
                             }}
                           >
-                            {level.label}
+                            {value.grade_label || level.label}
                           </span>
                         ) : (
                           '-'

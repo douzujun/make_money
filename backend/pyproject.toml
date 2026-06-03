@@ -19,6 +19,7 @@ dependencies = [
     "pysocks>=1.7.0",
     "bcrypt>=4.1.0",
     "python-jose>=3.3.0",
+    "akshare>=1.18.63",
 ]
 
 [project.optional-dependencies]

@@ -204,6 +204,36 @@ def init_indicator_templates(db: Session):
             "is_active": True,
         },
         {
+            "id": "RSI",
+            "name": "RSI 相对强弱指数",
+            "description": "14日相对强弱指数，用于判断短期超买/超卖状态",
+            "indicator_type": "sentiment",
+            "category": "sentiment",
+            "processor_class": "RSI",
+            "default_params": {
+                "period": 14,
+                "price_field": "close",
+            },
+            "output_fields": [
+                {"name": "value", "type": "float", "description": "RSI 值 (0-100)"},
+                {"name": "value_text", "type": "string", "description": "文本描述", "optional": True},
+                {"name": "grade", "type": "string", "description": "档位", "optional": True},
+                {"name": "grade_label", "type": "string", "description": "档位标签", "optional": True},
+            ],
+            "grading_config": {
+                "grades": [
+                    {"grade": "extreme_oversold",   "min": 0,   "max": 20,  "label": "极度超卖"},
+                    {"grade": "oversold",           "min": 20,  "max": 30,  "label": "超卖"},
+                    {"grade": "weak",               "min": 30,  "max": 45,  "label": "偏弱"},
+                    {"grade": "neutral",            "min": 45,  "max": 55,  "label": "中性"},
+                    {"grade": "strong",             "min": 55,  "max": 70,  "label": "偏强"},
+                    {"grade": "overbought",         "min": 70,  "max": 80,  "label": "超买"},
+                    {"grade": "extreme_overbought", "min": 80,  "max": 101, "label": "极度超买"},
+                ]
+            },
+            "is_active": True,
+        },
+        {
             "id": "GVZ",
             "name": "黄金波动率指数GVZ",
             "description": "CBOE Gold Volatility Index，黄金恐慌指数",

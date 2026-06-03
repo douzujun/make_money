@@ -1,5 +1,19 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Star, Plus, TrendingUp, TrendingDown, Trash2, ExternalLink, RefreshCw, AlertCircle, Download, Loader2 } from 'lucide-react';
+import { Star, Plus, TrendingUp, TrendingDown, Trash2, ExternalLink, RefreshCw, AlertCircle, Download, Loader2, Info, ChevronDown, ChevronUp } from 'lucide-react';
+
+// 波动率指数：监测对象说明
+const VOLATILITY_DESC: Record<string, string> = {
+  'VIX':  '监测标普500大盘',
+  '^VIX': '监测标普500大盘',
+  'VXN':  '监测纳斯达克科技股',
+  '^VXN': '监测纳斯达克科技股',
+  'VXD':  '监测道琼斯蓝筹股',
+  '^VXD': '监测道琼斯蓝筹股',
+  'OVX':  '监测原油市场',
+  '^OVX': '监测原油市场',
+  'GVZ':  '监测黄金市场',
+  '^GVZ': '监测黄金市场',
+};
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import axios from 'axios';
 import dayjs from 'dayjs';
@@ -80,6 +94,7 @@ export default function Watchlist() {
   const [backfillingIds, setBackfillingIds] = useState<Set<string>>(new Set());
   const [backfillResults, setBackfillResults] = useState<Record<string, string>>({});
   const [activeCategory, setActiveCategory] = useState<AssetCategory>('equities');
+  const [showHint, setShowHint] = useState(false);
 
   // Filter assets by category
   const filteredAssets = assets.filter(asset => {
@@ -477,8 +492,108 @@ export default function Watchlist() {
       )}
 
       {/* Watchlist Content */}
-      {loading ? (
-        <div
+
+      {/* Volatility Hint Card — equities tab only */}
+      {activeCategory === 'equities' && hasWatchlist && (
+        <div style={{
+          marginBottom: '16px',
+          borderRadius: '12px',
+          border: '1px solid rgba(99,102,241,0.25)',
+          background: 'rgba(99,102,241,0.05)',
+          overflow: 'hidden',
+        }}>
+          {/* Header row (always visible) */}
+          <div
+            onClick={() => setShowHint(v => !v)}
+            style={{
+              padding: '10px 16px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              cursor: 'pointer',
+              userSelect: 'none',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <Info size={15} color="#6366f1" />
+              <span style={{ fontSize: '13px', fontWeight: 600, color: '#6366f1' }}>
+                波动率指数解读指南
+              </span>
+              <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                — 数值越高 = 市场越恐慌
+              </span>
+            </div>
+            {showHint
+              ? <ChevronUp size={15} color="#6366f1" />
+              : <ChevronDown size={15} color="#6366f1" />}
+          </div>
+
+          {/* Expandable content */}
+          {showHint && (
+            <div style={{
+              padding: '0 16px 14px',
+              borderTop: '1px solid rgba(99,102,241,0.15)',
+            }}>
+              {/* Threshold table */}
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(4, 1fr)',
+                gap: '8px',
+                marginTop: '12px',
+                marginBottom: '12px',
+              }}>
+                {[
+                  { range: 'VIX < 20',  label: '低波动',   desc: '市场平静，正常操作',          color: '#22c55e' },
+                  { range: 'VIX 20–30', label: '波动加剧', desc: '风险上升，谨慎仓位',           color: '#f59e0b' },
+                  { range: 'VIX > 30',  label: '市场恐慌', desc: '历史上往往是左侧布局时机',    color: '#ef4444' },
+                  { range: 'VIX > 40',  label: '极度恐慌', desc: '类2008/2020，可能是历史底部', color: '#dc2626' },
+                ].map(item => (
+                  <div key={item.range} style={{
+                    padding: '10px 12px',
+                    borderRadius: '8px',
+                    background: 'var(--bg-primary)',
+                    border: `1px solid ${item.color}33`,
+                  }}>
+                    <div style={{ fontSize: '12px', fontWeight: 700, color: item.color, marginBottom: '4px' }}>
+                      {item.range}
+                    </div>
+                    <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '2px' }}>
+                      {item.label}
+                    </div>
+                    <div style={{ fontSize: '11px', color: 'var(--text-muted)', lineHeight: '1.4' }}>
+                      {item.desc}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Tips */}
+              <div style={{
+                display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px',
+              }}>
+                {[
+                  { icon: '📊', text: 'VXN 通常高于 VIX，科技股波动本来就大；VXD 略低于 VIX，蓝筹股更稳健。' },
+                  { icon: '🛢️', text: 'OVX 飙升（>60）往往伴随油价大幅震荡，配合 CL=F 价格走势一起判断方向。' },
+                  { icon: '🥇', text: 'GVZ 上升 + 黄金价格上涨 = 避险资金涌入；GVZ 上升但黄金跌 = 市场抛售一切。' },
+                  { icon: '💡', text: '各指数历史分位比绝对值更有参考意义，点进详情页看历史走势图。' },
+                ].map(tip => (
+                  <div key={tip.icon} style={{
+                    display: 'flex', gap: '8px', alignItems: 'flex-start',
+                    padding: '8px 10px', borderRadius: '8px',
+                    background: 'var(--bg-primary)',
+                    fontSize: '12px', color: 'var(--text-secondary)', lineHeight: '1.5',
+                  }}>
+                    <span style={{ flexShrink: 0 }}>{tip.icon}</span>
+                    <span>{tip.text}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {loading ? (        <div
           style={{
             background: 'var(--bg-primary)',
             borderRadius: '20px',
@@ -639,6 +754,17 @@ export default function Watchlist() {
                           >
                             {asset.name}
                           </p>
+                          {VOLATILITY_DESC[asset.symbol] && (
+                            <span style={{
+                              fontSize: '11px',
+                              color: '#6366f1',
+                              marginTop: '2px',
+                              display: 'block',
+                              fontWeight: 500,
+                            }}>
+                              {VOLATILITY_DESC[asset.symbol]}
+                            </span>
+                          )}
                         </div>
                       </div>
                     </td>

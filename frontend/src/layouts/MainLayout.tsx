@@ -1,338 +1,214 @@
 import { useState, useEffect } from 'react';
 import { Outlet, Link, useLocation } from 'react-router-dom';
 import {
-  LayoutDashboard,
-  Database,
-  Activity,
-  Star,
-  Menu,
-  X,
-  ChevronRight,
-  Bell,
-  BarChart3,
-  LogOut,
+  LayoutDashboard, Database, Activity, Star,
+  Bell, BarChart3, LogOut, LineChart, BarChart2, ChevronRight, Menu, X, TrendingUp, PieChart,
 } from 'lucide-react';
 import { useAuthStore } from '@/stores/auth';
 
 const menuItems = [
-  { path: '/', label: '仪表盘', icon: LayoutDashboard },
-  { path: '/assets', label: '标的列表', icon: Database },
-  { path: '/watchlist', label: '关注列表', icon: Star },
-  { path: '/indicators', label: '指标中心', icon: Activity },
+  { path: '/',            label: '仪表盘',    icon: LayoutDashboard },
+  { path: '/investment',  label: '投资仪表盘', icon: LineChart },
+  { path: '/sector-flow', label: '板块资金流', icon: BarChart2 },
+  { path: '/big-money',   label: '大资金动向', icon: TrendingUp },
+  { path: '/backtest',    label: '组合回测',   icon: PieChart },
+  { path: '/assets',      label: '标的列表',  icon: Database },
+  { path: '/watchlist',   label: '关注列表',  icon: Star },
+  { path: '/indicators',  label: '指标中心',  icon: Activity },
 ];
 
 export default function MainLayout() {
   const location = useLocation();
-  const from = (location.state as { from?: string })?.from;
-  const isFromWatchlist = from === 'watchlist';
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isMobile, setIsMobile] = useState(false);
   const { logout } = useAuthStore();
 
   useEffect(() => {
-    const checkMobile = () => {
-      setIsMobile(window.innerWidth < 1024);
-      if (window.innerWidth < 1024) {
-        setSidebarOpen(false);
-      } else {
-        setSidebarOpen(true);
-      }
+    const check = () => {
+      const mobile = window.innerWidth < 1024;
+      setIsMobile(mobile);
+      setSidebarOpen(!mobile);
     };
-
-    checkMobile();
-    window.addEventListener('resize', checkMobile);
-    return () => window.removeEventListener('resize', checkMobile);
+    check();
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
   }, []);
 
+  const from = (location.state as { from?: string })?.from;
+  const isFromWatchlist = from === 'watchlist';
+
   const isActive = (path: string) => {
-    if (path === '/') {
-      return location.pathname === '/';
-    }
-    
-    // When on asset detail page, only highlight based on source
+    if (path === '/') return location.pathname === '/';
     if (location.pathname.startsWith('/assets/')) {
-      if (path === '/watchlist' && isFromWatchlist) {
-        return true;
-      }
-      if (path === '/assets' && !isFromWatchlist) {
-        return true;
-      }
+      if (path === '/watchlist' && isFromWatchlist) return true;
+      if (path === '/assets' && !isFromWatchlist) return true;
       return false;
     }
-    
-    // Normal matching for other pages
     return location.pathname.startsWith(path);
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', background: 'var(--bg-secondary)' }}>
-      {/* Top Navigation Bar */}
-      <header
-        style={{
-          height: '64px',
-          background: 'var(--bg-primary)',
-          borderBottom: '1px solid var(--border-color)',
-          display: 'flex',
-          alignItems: 'center',
-          padding: '0 24px',
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          zIndex: 100,
-        }}
-      >
+    <div style={{ display: 'flex', height: '100vh', background: 'var(--bg-secondary)' }}>
+
+      {/* ── Sidebar ──────────────────────────────────────── */}
+      <aside style={{
+        width: sidebarOpen ? 220 : 0,
+        flexShrink: 0,
+        height: '100vh',
+        background: 'var(--bg-primary)',
+        borderRight: sidebarOpen ? '1px solid var(--border-color)' : 'none',
+        display: 'flex',
+        flexDirection: 'column',
+        position: isMobile ? 'fixed' : 'sticky',
+        top: 0,
+        left: 0,
+        zIndex: isMobile ? 99 : 'auto' as any,
+        overflow: 'hidden',
+        transition: 'width 0.25s ease',
+      }}>
+
         {/* Logo */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginRight: '16px' }}>
-          <div
-            style={{
-              width: '40px',
-              height: '40px',
-              borderRadius: '10px',
+        <div style={{
+          padding: '20px 20px 16px',
+          borderBottom: '1px solid var(--border-color)',
+          flexShrink: 0,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{
+              width: 38, height: 38, borderRadius: 10,
               background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
               flexShrink: 0,
-            }}
-          >
-            <BarChart3 size={22} color="white" />
-          </div>
-          <div>
-            <div
-              style={{
-                fontSize: '18px',
-                fontWeight: 700,
-                color: 'var(--text-primary)',
-                letterSpacing: '-0.5px',
-              }}
-            >
-              Vestoria
+            }}>
+              <BarChart3 size={20} color="white" />
             </div>
-            <div
-              style={{
-                fontSize: '11px',
-                color: 'var(--text-muted)',
-                marginTop: '-2px',
-              }}
-            >
-              数据终端
+            <div style={{ whiteSpace: 'nowrap', overflow: 'hidden' }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--text-primary)', letterSpacing: '-0.4px' }}>
+                Vestoria
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: '-1px' }}>数据终端</div>
             </div>
           </div>
         </div>
 
-        {/* Sidebar Toggle Button */}
-        <button
-          onClick={() => setSidebarOpen(!sidebarOpen)}
-          style={{
-            width: '36px',
-            height: '36px',
-            borderRadius: '8px',
-            border: '1px solid var(--border-color)',
-            background: 'var(--bg-secondary)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            cursor: 'pointer',
-            color: 'var(--text-secondary)',
-            transition: 'all 0.2s ease',
-            marginRight: '16px',
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.borderColor = 'var(--primary-color)';
-            e.currentTarget.style.color = 'var(--primary-color)';
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.borderColor = 'var(--border-color)';
-            e.currentTarget.style.color = 'var(--text-secondary)';
-          }}
-          title={sidebarOpen ? '收起侧边栏' : '展开侧边栏'}
-        >
-          {sidebarOpen ? <X size={18} /> : <Menu size={18} />}
-        </button>
+        {/* Nav */}
+        <nav style={{ flex: 1, padding: '12px', overflowY: 'auto' }}>
+          <div style={{
+            fontSize: 10, fontWeight: 700, color: 'var(--text-muted)',
+            letterSpacing: '0.8px', textTransform: 'uppercase',
+            margin: '4px 8px 10px', whiteSpace: 'nowrap',
+          }}>
+            主菜单
+          </div>
+          {menuItems.map(({ path, label, icon: Icon }) => {
+            const active = isActive(path);
+            return (
+              <Link
+                key={path}
+                to={path}
+                onClick={() => isMobile && setSidebarOpen(false)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 10,
+                  padding: '9px 12px', marginBottom: 2, borderRadius: 10,
+                  textDecoration: 'none', fontSize: 13, fontWeight: 500,
+                  whiteSpace: 'nowrap',
+                  color: active ? '#6366f1' : 'var(--text-secondary)',
+                  background: active
+                    ? 'linear-gradient(135deg, rgba(99,102,241,0.12) 0%, rgba(139,92,246,0.06) 100%)'
+                    : 'transparent',
+                  border: active ? '1px solid rgba(99,102,241,0.18)' : '1px solid transparent',
+                  transition: 'all 0.15s',
+                }}
+                onMouseEnter={e => {
+                  if (!active) (e.currentTarget as HTMLElement).style.background = 'var(--bg-secondary)';
+                }}
+                onMouseLeave={e => {
+                  if (!active) (e.currentTarget as HTMLElement).style.background = 'transparent';
+                }}
+              >
+                <Icon size={17} />
+                <span style={{ flex: 1 }}>{label}</span>
+                {active && <ChevronRight size={13} style={{ opacity: 0.4 }} />}
+              </Link>
+            );
+          })}
+        </nav>
 
-        {/* Spacer */}
-        <div style={{ flex: 1 }} />
-
-        {/* Right Actions */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <button
-            style={{
-              width: '40px',
-              height: '40px',
-              borderRadius: '10px',
-              border: '1px solid var(--border-color)',
-              background: 'var(--bg-secondary)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              cursor: 'pointer',
-              color: 'var(--text-secondary)',
-              transition: 'all 0.2s ease',
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.borderColor = 'var(--primary-color)';
-              e.currentTarget.style.color = 'var(--primary-color)';
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.borderColor = 'var(--border-color)';
-              e.currentTarget.style.color = 'var(--text-secondary)';
-            }}
-          >
-            <Bell size={20} />
-          </button>
+        {/* Bottom — logout */}
+        <div style={{ padding: '12px', borderTop: '1px solid var(--border-color)', flexShrink: 0 }}>
           <button
             onClick={logout}
             style={{
-              height: '40px',
-              borderRadius: '10px',
-              border: '1px solid var(--border-color)',
-              background: 'var(--bg-secondary)',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              padding: '0 12px',
-              cursor: 'pointer',
-              color: 'var(--text-secondary)',
-              gap: '6px',
+              width: '100%', display: 'flex', alignItems: 'center', gap: 10,
+              padding: '9px 12px', borderRadius: 10,
+              border: '1px solid var(--border-color)', background: 'transparent',
+              cursor: 'pointer', fontSize: 13, color: 'var(--text-secondary)',
+              whiteSpace: 'nowrap',
             }}
-            title="退出登录"
+            onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-secondary)'; }}
+            onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
           >
-            <LogOut size={16} />
-            退出
+            <LogOut size={16} /> 退出登录
           </button>
         </div>
-      </header>
+      </aside>
 
-      {/* Main Layout Container */}
-      <div style={{ display: 'flex', flex: 1, marginTop: '64px' }}>
-        {/* Sidebar */}
-        <aside
-          style={{
-            position: isMobile ? 'fixed' : 'relative',
-            left: 0,
-            top: 0,
-            height: isMobile ? 'calc(100vh - 64px)' : 'calc(100vh - 64px)',
-            width: sidebarOpen ? '240px' : '72px',
-            background: 'var(--bg-primary)',
-            borderRight: '1px solid var(--border-color)',
-            transition: 'width 0.3s ease, transform 0.3s ease',
-            zIndex: 99,
-            display: 'flex',
-            flexDirection: 'column',
-            boxShadow: sidebarOpen ? '4px 0 24px rgba(0,0,0,0.06)' : 'none',
-            transform: isMobile && !sidebarOpen ? 'translateX(-100%)' : 'translateX(0)',
-          }}
-        >
-          {/* Navigation */}
-          <nav style={{ flex: 1, padding: '16px 12px', overflowY: 'auto' }}>
-            <div
-              style={{
-                fontSize: '11px',
-                fontWeight: 600,
-                color: 'var(--text-muted)',
-                textTransform: 'uppercase',
-                letterSpacing: '0.5px',
-                marginBottom: '12px',
-                marginLeft: sidebarOpen ? '12px' : '0',
-                textAlign: sidebarOpen ? 'left' : 'center',
-              }}
-            >
-              {sidebarOpen ? '主菜单' : '•••'}
-            </div>
+      {/* Mobile overlay */}
+      {isMobile && sidebarOpen && (
+        <div
+          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 98 }}
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
 
-            {menuItems.map((item) => {
-              const Icon = item.icon;
-              const active = isActive(item.path);
-              return (
-                <Link
-                  key={item.path}
-                  to={item.path}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '12px',
-                    padding: sidebarOpen ? '12px 16px' : '12px',
-                    marginBottom: '4px',
-                    borderRadius: '10px',
-                    textDecoration: 'none',
-                    color: active ? 'var(--primary-color)' : 'var(--text-secondary)',
-                    background: active
-                      ? 'linear-gradient(135deg, rgba(99, 102, 241, 0.1) 0%, rgba(139, 92, 246, 0.05) 100%)'
-                      : 'transparent',
-                    transition: 'all 0.2s ease',
-                    justifyContent: sidebarOpen ? 'flex-start' : 'center',
-                    border: active ? '1px solid rgba(99, 102, 241, 0.2)' : '1px solid transparent',
-                  }}
-                  onMouseEnter={(e) => {
-                    if (!active) {
-                      e.currentTarget.style.background = 'var(--bg-tertiary)';
-                      e.currentTarget.style.color = 'var(--text-primary)';
-                    }
-                  }}
-                  onMouseLeave={(e) => {
-                    if (!active) {
-                      e.currentTarget.style.background = 'transparent';
-                      e.currentTarget.style.color = 'var(--text-secondary)';
-                    }
-                  }}
-                >
-                  <Icon size={20} />
-                  {sidebarOpen && (
-                    <span style={{ fontSize: '14px', fontWeight: 500 }}>{item.label}</span>
-                  )}
-                  {sidebarOpen && active && (
-                    <ChevronRight
-                      size={16}
-                      style={{ marginLeft: 'auto', opacity: 0.5 }}
-                    />
-                  )}
-                </Link>
-              );
-            })}
-          </nav>
-        </aside>
+      {/* ── Right side ───────────────────────────────────── */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
 
-        {/* Overlay for mobile */}
-        {isMobile && sidebarOpen && (
-          <div
+        {/* Thin top bar */}
+        <header style={{
+          height: 52, flexShrink: 0,
+          background: 'var(--bg-primary)',
+          borderBottom: '1px solid var(--border-color)',
+          display: 'flex', alignItems: 'center',
+          padding: '0 20px', gap: 10,
+        }}>
+          <button
+            onClick={() => setSidebarOpen(v => !v)}
+            title={sidebarOpen ? '收起侧边栏' : '展开侧边栏'}
             style={{
-              position: 'fixed',
-              inset: 0,
-              background: 'rgba(0, 0, 0, 0.5)',
-              zIndex: 98,
-              top: '64px',
+              width: 34, height: 34, borderRadius: 8,
+              border: '1px solid var(--border-color)', background: 'var(--bg-secondary)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              cursor: 'pointer', color: 'var(--text-secondary)', flexShrink: 0,
             }}
-            onClick={() => setSidebarOpen(false)}
-          />
-        )}
-
-        {/* Main Content */}
-        <main 
-          style={{ 
-            flex: 1, 
-            display: 'flex', 
-            flexDirection: 'column',
-            minWidth: 0,
-            marginLeft: isMobile ? 0 : undefined,
-          }}
-        >
-          <div
-            style={{
-              flex: 1,
-              padding: '24px 32px',
-              overflowY: 'auto',
-              height: 'calc(100vh - 64px)',
+            onMouseEnter={e => {
+              (e.currentTarget as HTMLElement).style.borderColor = 'var(--primary-color)';
+              (e.currentTarget as HTMLElement).style.color = 'var(--primary-color)';
+            }}
+            onMouseLeave={e => {
+              (e.currentTarget as HTMLElement).style.borderColor = 'var(--border-color)';
+              (e.currentTarget as HTMLElement).style.color = 'var(--text-secondary)';
             }}
           >
-            <div
-              style={{
-                maxWidth: '1600px',
-                margin: '0 auto',
-              }}
-            >
-              <Outlet />
-            </div>
+            {sidebarOpen ? <X size={16} /> : <Menu size={16} />}
+          </button>
+
+          <div style={{ flex: 1 }} />
+
+          <button style={{
+            width: 34, height: 34, borderRadius: 8,
+            border: '1px solid var(--border-color)', background: 'var(--bg-secondary)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            cursor: 'pointer', color: 'var(--text-secondary)',
+          }}>
+            <Bell size={16} />
+          </button>
+        </header>
+
+        {/* Content */}
+        <main style={{ flex: 1, overflowY: 'auto', padding: '24px 28px' }}>
+          <div style={{ maxWidth: 1400, margin: '0 auto' }}>
+            <Outlet />
           </div>
         </main>
       </div>

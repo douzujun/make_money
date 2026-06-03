@@ -10,6 +10,10 @@ import Indicators from '@/pages/Indicators';
 import IndicatorDetail from '@/pages/IndicatorDetail';
 import Watchlist from '@/pages/Watchlist';
 import Login from '@/pages/Login';
+import InvestmentDashboard from '@/pages/InvestmentDashboard';
+import SectorFlow from '@/pages/SectorFlow';
+import BigMoney from '@/pages/BigMoney';
+import Backtest from '@/pages/Backtest';
 
 // Layouts
 import MainLayout from '@/layouts/MainLayout';
@@ -27,6 +31,14 @@ function RouteTitleManager() {
       pageTitle = '登录';
     } else if (path === '/') {
       pageTitle = '仪表盘';
+    } else if (path === '/investment') {
+      pageTitle = '投资仪表盘';
+    } else if (path === '/sector-flow') {
+      pageTitle = '板块资金流';
+    } else if (path === '/big-money') {
+      pageTitle = '大资金动向';
+    } else if (path === '/backtest') {
+      pageTitle = '组合回测';
     } else if (path === '/assets') {
       pageTitle = '标的列表';
     } else if (path.startsWith('/assets/')) {
@@ -91,6 +103,10 @@ function App() {
           {isAuthenticated ? (
             <Route path="/" element={<MainLayout />}>
               <Route index element={<Dashboard />} />
+              <Route path="investment" element={<InvestmentDashboard />} />
+              <Route path="sector-flow" element={<SectorFlow />} />
+              <Route path="big-money" element={<BigMoney />} />
+              <Route path="backtest" element={<Backtest />} />
               <Route path="assets" element={<Assets />} />
               <Route path="assets/:id" element={<AssetDetail />} />
               <Route path="indicators" element={<Indicators />} />

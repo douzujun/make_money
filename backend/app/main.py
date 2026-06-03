@@ -12,10 +12,13 @@ from app.services.scheduler import get_data_scheduler
 from app.models.asset import Asset
 from app.models.indicator import Indicator, IndicatorTemplate
 from app.models.admin import Admin
+from app.models.big_money import NorthboundFlow, EtfShareRecord, BigMoneySignal  # noqa: F401
+from app.models.backtest import EtfPriceCache  # noqa: F401
 from app.indicators.btc_fear_greed import init_btc_fear_greed_targets
 from app.indicators.cnn_fear_greed import init_cnn_fear_greed_targets
 from app.indicators.ma200 import init_ma200_targets
 from app.indicators.volatility_indices import init_volatility_targets
+from app.indicators.rsi import init_dashboard_targets
 from app.services.auth_service import AuthService
 
 # Import fetchers to register them
@@ -53,6 +56,7 @@ def init_indicators():
         created_count += init_cnn_fear_greed_targets(db)
         created_count += init_ma200_targets(db)
         created_count += init_volatility_targets(db)
+        created_count += init_dashboard_targets(db)
 
         db.commit()
         

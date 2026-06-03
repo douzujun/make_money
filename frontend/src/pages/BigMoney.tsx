@@ -1,0 +1,772 @@
+import { useEffect, useRef, useState, useCallback } from 'react';
+import axios from 'axios';
+import { Activity, Database, RefreshCw, ShieldCheck, TrendingDown, TrendingUp } from 'lucide-react';
+import { createChart, ColorType, HistogramSeries, LineSeries, LineType, createSeriesMarkers } from 'lightweight-charts';
+
+const API = import.meta.env.VITE_API_URL || '';
+const POST_OPTS = { timeout: 8000 };
+
+// ── Types ────────────────────────────────────────────────────────────────────
+
+interface NorthboundRow {
+  date: string;
+  net_buy_amount: number | null;
+  hs300_close: number | null;
+  hs300_change_pct: number | null;
+}
+interface HuijinEvent { date: string; label: string; }
+interface NorthboundResp { data: NorthboundRow[]; huijin_events: HuijinEvent[]; message?: string; }
+interface EtfRow { date: string; total_share: number | null; name: string; }
+interface EtfResp { symbols: string[]; data: Record<string, EtfRow[]>; huijin_events: HuijinEvent[]; message?: string; }
+interface TodayResp {
+  northbound: { date: string | null; channels: { channel: string; net_buy_amount: number | null; hs300_change_pct: number | null }[] };
+  etf_shares: { date: string | null; items: { symbol: string; name: string; total_share: number | null }[] };
+}
+interface IntradayRow { time: string; sh_hk: number | null; sz_hk: number | null; total: number | null; }
+interface IntradayResp { date: string | null; data: IntradayRow[]; source_broken?: boolean; message?: string; }
+interface SignalEtfEvidence {
+  symbol: string;
+  name: string;
+  total_share: number | null;
+  previous_share?: number | null;
+  delta_share: number | null;
+  nav?: number | null;
+  estimated_amount: number | null;
+  status: string;
+}
+interface BigMoneySignalRow {
+  date: string;
+  signal: 'accumulate' | 'reduce' | 'support_fading' | 'neutral' | string;
+  signal_label: string;
+  watch_signal: string;
+  watch_label: string;
+  confidence: 'high' | 'medium' | 'low' | string;
+  basket_delta_share: number | null;
+  estimated_amount: number | null;
+  z_score: number | null;
+  market_daily_change: number | null;
+  market_drawdown_20: number | null;
+  positive_etf_count: number;
+  negative_etf_count: number;
+  data_quality: string;
+  evidence?: {
+    core_etfs?: SignalEtfEvidence[];
+    explanation?: string;
+    baseline_count?: number;
+  };
+}
+interface BigMoneySignalResp {
+  data: BigMoneySignalRow[];
+  latest: BigMoneySignalRow | null;
+  message?: string;
+}
+
+// ── Time range ───────────────────────────────────────────────────────────────
+
+type Range = '1M' | '3M' | '1Y' | '3Y' | 'ALL';
+const RANGES: Range[] = ['1M', '3M', '1Y', '3Y', 'ALL'];
+const RANGE_LABEL: Record<Range, string> = { '1M': '1个月', '3M': '3个月', '1Y': '1年', '3Y': '3年', 'ALL': '全部' };
+
+function filterByRange<T extends { date: string }>(data: T[], range: Range): T[] {
+  if (range === 'ALL') return data;
+  const now = new Date();
+  const cutoff = new Date(now);
+  if (range === '1M') cutoff.setMonth(now.getMonth() - 1);
+  else if (range === '3M') cutoff.setMonth(now.getMonth() - 3);
+  else if (range === '1Y') cutoff.setFullYear(now.getFullYear() - 1);
+  else if (range === '3Y') cutoff.setFullYear(now.getFullYear() - 3);
+  const cutoffStr = cutoff.toISOString().slice(0, 10);
+  return data.filter(r => r.date >= cutoffStr);
+}
+
+function RangeButtons({ value, onChange }: { value: Range; onChange: (r: Range) => void }) {
+  return (
+    <div style={{ display: 'flex', gap: 4 }}>
+      {RANGES.map(r => (
+        <button
+          key={r}
+          onClick={() => onChange(r)}
+          style={{
+            padding: '4px 10px', borderRadius: 6, fontSize: 11, cursor: 'pointer',
+            border: `1px solid ${value === r ? '#6366f1' : 'var(--border-color)'}`,
+            background: value === r ? 'rgba(99,102,241,0.12)' : 'transparent',
+            color: value === r ? '#6366f1' : 'var(--text-muted)',
+            fontWeight: value === r ? 600 : 400,
+            transition: 'all 0.15s',
+          }}
+        >
+          {RANGE_LABEL[r]}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+const fmtYi = (v: number | null) => v === null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}亿`;
+const fmtYiFen = (v: number | null) => v === null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}亿份`;
+const fmtPct = (v: number | null) => v === null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
+const fmtSigma = (v: number | null) => v === null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}σ`;
+const flowColor = (v: number | null) => v === null ? '#6b7280' : v > 0 ? '#ef4444' : '#22c55e';
+const signalColor = (signal: string, watch?: string) => {
+  if (signal === 'accumulate' || watch === 'watch_accumulate') return '#ef4444';
+  if (signal === 'reduce' || signal === 'support_fading' || watch === 'watch_reduce') return '#22c55e';
+  return '#9ca3af';
+};
+const signalBg = (signal: string, watch?: string) => {
+  if (signal === 'accumulate' || watch === 'watch_accumulate') return 'rgba(239,68,68,0.10)';
+  if (signal === 'reduce' || signal === 'support_fading' || watch === 'watch_reduce') return 'rgba(34,197,94,0.10)';
+  return 'rgba(107,114,128,0.10)';
+};
+const confidenceLabel = (v: string) => v === 'high' ? '高' : v === 'medium' ? '中' : '低';
+const dataQualityLabel = (v: string) => ({
+  complete: '数据完整',
+  partial: '数据不完整',
+  insufficient_baseline: '基线不足',
+  partial_insufficient_baseline: '数据/基线不足',
+  unknown: '未知',
+}[v] || v);
+
+const ETF_COLORS: Record<string, string> = {
+  '510050': '#6366f1', '510300': '#f59e0b', '510500': '#06b6d4',
+};
+
+// ── Chart components ──────────────────────────────────────────────────────────
+
+const DATA_GAP_DATE = '2024-08-16';  // East Money API stopped providing data after this date
+
+function NorthboundChart({ data, huijinEvents }: { data: NorthboundRow[]; huijinEvents: HuijinEvent[] }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const hasGap = data.some(r => r.date <= DATA_GAP_DATE);
+
+  useEffect(() => {
+    if (!containerRef.current || data.length === 0) return;
+    const chart = createChart(containerRef.current, {
+      width: containerRef.current.clientWidth, height: 260,
+      layout: { background: { type: ColorType.Solid, color: 'transparent' }, textColor: '#9ca3af' },
+      grid: { vertLines: { color: 'rgba(255,255,255,0.05)' }, horzLines: { color: 'rgba(255,255,255,0.05)' } },
+      timeScale: { borderColor: 'rgba(255,255,255,0.1)' },
+      rightPriceScale: { borderColor: 'rgba(255,255,255,0.1)' },
+      crosshair: { mode: 1 },
+    });
+    const series = chart.addSeries(LineSeries, {
+      color: '#6366f1', lineWidth: 2, lineType: LineType.Curved,
+      priceFormat: { type: 'price', precision: 2, minMove: 0.01 }, title: '净买额(亿)',
+    });
+    series.setData(
+      data.filter(r => r.net_buy_amount !== null)
+          .map(r => ({ time: r.date as any, value: r.net_buy_amount as number }))
+    );
+    // Zero baseline
+    series.createPriceLine({ price: 0, color: 'rgba(255,255,255,0.15)', lineWidth: 1, lineStyle: 0, axisLabelVisible: false, title: '' });
+
+    // Data gap marker at 2024-08-16
+    let markers: ReturnType<typeof createSeriesMarkers> | null = null;
+    if (hasGap) {
+      markers = createSeriesMarkers(series, [
+        {
+          time: DATA_GAP_DATE as any,
+          position: 'aboveBar',
+          color: '#f59e0b',
+          shape: 'arrowDown',
+          text: '数据断档',
+          size: 1,
+        },
+      ]);
+    }
+
+    chart.timeScale().fitContent();
+    const ro = new ResizeObserver(() => {
+      if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth });
+    });
+    ro.observe(containerRef.current);
+    return () => { markers?.detach(); chart.remove(); ro.disconnect(); };
+  }, [data, huijinEvents, hasGap]);
+
+  if (data.length === 0) return <EmptyChart text="该时间段暂无数据" />;
+  return <div ref={containerRef} style={{ width: '100%' }} />;
+}
+
+function EtfShareChart({ symbols, etfData, range }: {
+  symbols: string[]; etfData: Record<string, EtfRow[]>; range: Range;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!containerRef.current || symbols.length === 0) return;
+    const chart = createChart(containerRef.current, {
+      width: containerRef.current.clientWidth, height: 260,
+      layout: { background: { type: ColorType.Solid, color: 'transparent' }, textColor: '#9ca3af' },
+      grid: { vertLines: { color: 'rgba(255,255,255,0.05)' }, horzLines: { color: 'rgba(255,255,255,0.05)' } },
+      timeScale: { borderColor: 'rgba(255,255,255,0.1)' },
+      rightPriceScale: { borderColor: 'rgba(255,255,255,0.1)' },
+      crosshair: { mode: 1 },
+    });
+    symbols.forEach(sym => {
+      const rows = filterByRange(etfData[sym] || [], range);
+      const series = chart.addSeries(LineSeries, {
+        color: ETF_COLORS[sym] || '#9ca3af', lineWidth: 2, lineType: LineType.Curved,
+        priceFormat: { type: 'price', precision: 2, minMove: 0.01 }, title: `${sym}(亿份)`,
+      });
+      series.setData(
+        rows.filter(r => r.total_share !== null).map(r => ({ time: r.date as any, value: r.total_share as number }))
+      );
+    });
+    chart.timeScale().fitContent();
+    const ro = new ResizeObserver(() => {
+      if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth });
+    });
+    ro.observe(containerRef.current);
+    return () => { chart.remove(); ro.disconnect(); };
+  }, [symbols, etfData, range]);
+
+  if (symbols.length === 0) return <EmptyChart text="暂无 ETF 份额数据" />;
+  return <div ref={containerRef} style={{ width: '100%' }} />;
+}
+
+function SignalEvidenceChart({ data, range }: { data: BigMoneySignalRow[]; range: Range }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const rows = filterByRange(data, range);
+
+  useEffect(() => {
+    if (!containerRef.current || rows.length === 0) return;
+    const chart = createChart(containerRef.current, {
+      width: containerRef.current.clientWidth, height: 260,
+      layout: { background: { type: ColorType.Solid, color: 'transparent' }, textColor: '#9ca3af' },
+      grid: { vertLines: { color: 'rgba(255,255,255,0.05)' }, horzLines: { color: 'rgba(255,255,255,0.05)' } },
+      timeScale: { borderColor: 'rgba(255,255,255,0.1)' },
+      rightPriceScale: { borderColor: 'rgba(255,255,255,0.1)' },
+      crosshair: { mode: 1 },
+    });
+    const deltaSeries = chart.addSeries(HistogramSeries, {
+      priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+      title: '篮子份额变化(亿份)',
+    });
+    deltaSeries.setData(rows
+      .filter(r => r.basket_delta_share !== null)
+      .map(r => ({
+        time: r.date as any,
+        value: r.basket_delta_share as number,
+        color: (r.basket_delta_share ?? 0) >= 0 ? 'rgba(239,68,68,0.65)' : 'rgba(34,197,94,0.65)',
+      })));
+    deltaSeries.createPriceLine({ price: 0, color: 'rgba(255,255,255,0.18)', lineWidth: 1, lineStyle: 0, axisLabelVisible: false, title: '' });
+
+    const zSeries = chart.addSeries(LineSeries, {
+      color: '#f59e0b', lineWidth: 2, lineType: LineType.Curved,
+      priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+      title: '20日异常度(σ)',
+    });
+    zSeries.setData(rows
+      .filter(r => r.z_score !== null)
+      .map(r => ({ time: r.date as any, value: r.z_score as number })));
+    zSeries.createPriceLine({ price: 2.5, color: 'rgba(239,68,68,0.35)', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: '+2.5σ' });
+    zSeries.createPriceLine({ price: -2.5, color: 'rgba(34,197,94,0.35)', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: '-2.5σ' });
+
+    chart.timeScale().fitContent();
+    const ro = new ResizeObserver(() => {
+      if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth });
+    });
+    ro.observe(containerRef.current);
+    return () => { chart.remove(); ro.disconnect(); };
+  }, [rows]);
+
+  if (rows.length === 0) return <EmptyChart text="暂无托底信号数据" />;
+  return <div ref={containerRef} style={{ width: '100%' }} />;
+}
+
+function IntradayChart({ data, date, sourceBroken, message }: {
+  data: IntradayRow[]; date: string | null; sourceBroken?: boolean; message?: string;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!containerRef.current || data.length === 0) return;
+    const validData = data.filter(r => r.total !== null);
+    if (validData.length === 0) return;
+
+    const chart = createChart(containerRef.current, {
+      width: containerRef.current.clientWidth, height: 200,
+      layout: { background: { type: ColorType.Solid, color: 'transparent' }, textColor: '#9ca3af' },
+      grid: { vertLines: { color: 'rgba(255,255,255,0.05)' }, horzLines: { color: 'rgba(255,255,255,0.05)' } },
+      timeScale: { borderColor: 'rgba(255,255,255,0.1)', timeVisible: true, tickMarkFormatter: (_: any, __: any, locale: string) => '' },
+      rightPriceScale: { borderColor: 'rgba(255,255,255,0.1)' },
+      crosshair: { mode: 1 },
+    });
+
+    // Use index as time since minutes aren't ISO dates
+    const shSeries = chart.addSeries(LineSeries, { color: '#6366f1', lineWidth: 2, title: '沪股通' });
+    const szSeries = chart.addSeries(LineSeries, { color: '#f59e0b', lineWidth: 2, title: '深股通' });
+    const totalSeries = chart.addSeries(LineSeries, { color: '#10b981', lineWidth: 2, title: '北向合计' });
+
+    // Build time series — use trading date + index as fake timestamps for display
+    const baseDate = date ?? '2000-01-01';
+    const toTs = (idx: number) => {
+      const d = new Date(`${baseDate}T09:30:00+08:00`);
+      d.setMinutes(d.getMinutes() + idx);
+      return Math.floor(d.getTime() / 1000) as any;
+    };
+
+    shSeries.setData(validData.map((r, i) => ({ time: toTs(i), value: r.sh_hk ?? 0 })));
+    szSeries.setData(validData.map((r, i) => ({ time: toTs(i), value: r.sz_hk ?? 0 })));
+    totalSeries.setData(validData.map((r, i) => ({ time: toTs(i), value: r.total ?? 0 })));
+
+    totalSeries.createPriceLine({ price: 0, color: 'rgba(255,255,255,0.15)', lineWidth: 1, lineStyle: 0, axisLabelVisible: false, title: '' });
+    chart.timeScale().fitContent();
+
+    const ro = new ResizeObserver(() => {
+      if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth });
+    });
+    ro.observe(containerRef.current);
+    return () => { chart.remove(); ro.disconnect(); };
+  }, [data, date]);
+
+  if (sourceBroken || data.filter(r => r.total !== null && r.total !== 0).length === 0) {
+    return (
+      <div style={{
+        height: 120, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+        color: 'var(--text-muted)', fontSize: 12, gap: 6,
+        border: '1px dashed var(--border-color)', borderRadius: 10,
+        padding: '0 24px', textAlign: 'center',
+      }}>
+        <span style={{ color: '#f59e0b', fontWeight: 600 }}>数据源不可用</span>
+        <span>东方财富于 2024 年 8 月更改接口结构，AkShare 分钟级北向资金数据接口目前返回全零，暂无法显示盘中走势。</span>
+        {message && <span style={{ fontSize: 11, opacity: 0.7 }}>{message}</span>}
+      </div>
+    );
+  }
+  return <div ref={containerRef} style={{ width: '100%' }} />;
+}
+
+function EmptyChart({ text }: { text: string }) {
+  return (
+    <div style={{
+      height: 260, display: 'flex', alignItems: 'center', justifyContent: 'center',
+      color: 'var(--text-muted)', fontSize: 13, gap: 8,
+      border: '1px dashed var(--border-color)', borderRadius: 10,
+    }}>
+      <Database size={16} />{text}
+    </div>
+  );
+}
+
+function SectionCard({ title, subtitle, children, action }: {
+  title: string; subtitle?: string; children: React.ReactNode; action?: React.ReactNode;
+}) {
+  return (
+    <div style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-color)', borderRadius: 14, padding: '20px 24px' }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 16 }}>
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)' }}>{title}</div>
+          {subtitle && <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>{subtitle}</div>}
+        </div>
+        {action}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function TodayCards({ today }: { today: TodayResp | null }) {
+  if (!today) return null;
+  const channels = today.northbound.channels;
+  const total = channels.find(c => c.channel === 'total');
+  const shHk = channels.find(c => c.channel === 'sh_hk');
+  const szHk = channels.find(c => c.channel === 'sz_hk');
+  const cardStyle: React.CSSProperties = {
+    background: 'var(--bg-secondary)', border: '1px solid var(--border-color)',
+    borderRadius: 10, padding: '14px 16px', flex: 1, minWidth: 140,
+  };
+  const lbl: React.CSSProperties = { fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 };
+  const val = (v: number | null): React.CSSProperties => ({ fontSize: 20, fontWeight: 700, color: flowColor(v) });
+
+  return (
+    <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+      <div style={cardStyle}>
+        <div style={lbl}>北向资金 · 今日净买额</div>
+        <div style={val(total?.net_buy_amount ?? null)}>{fmtYi(total?.net_buy_amount ?? null)}</div>
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>{today.northbound.date ?? '—'}</div>
+      </div>
+      {shHk && (
+        <div style={cardStyle}>
+          <div style={lbl}>沪股通净买额</div>
+          <div style={val(shHk.net_buy_amount)}>{fmtYi(shHk.net_buy_amount)}</div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>沪深300 {fmtPct(shHk.hs300_change_pct)}</div>
+        </div>
+      )}
+      {szHk && (
+        <div style={cardStyle}>
+          <div style={lbl}>深股通净买额</div>
+          <div style={val(szHk.net_buy_amount)}>{fmtYi(szHk.net_buy_amount)}</div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>{today.northbound.date ?? '—'}</div>
+        </div>
+      )}
+      {today.etf_shares.items.map(item => (
+        <div key={item.symbol} style={cardStyle}>
+          <div style={lbl}>{item.symbol} · 基金份额</div>
+          <div style={{ fontSize: 20, fontWeight: 700, color: ETF_COLORS[item.symbol] || 'var(--text-primary)' }}>
+            {item.total_share !== null ? `${item.total_share.toFixed(2)}亿份` : '—'}
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>{item.name} · {today.etf_shares.date ?? '—'}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SupportSignalPanel({ latest }: { latest: BigMoneySignalRow | null }) {
+  if (!latest) {
+    return (
+      <div style={{ padding: 18, borderRadius: 10, background: 'var(--bg-secondary)', color: 'var(--text-muted)', fontSize: 13 }}>
+        暂无托底大盘信号，请先导入 ETF 份额历史。
+      </div>
+    );
+  }
+  const mainColor = signalColor(latest.signal, latest.watch_signal);
+  const displayLabel = latest.signal !== 'neutral' ? latest.signal_label : latest.watch_signal !== 'none' ? latest.watch_label : latest.signal_label;
+  const Icon = latest.signal === 'accumulate' || latest.watch_signal === 'watch_accumulate'
+    ? TrendingUp
+    : latest.signal === 'reduce' || latest.signal === 'support_fading' || latest.watch_signal === 'watch_reduce'
+    ? TrendingDown
+    : ShieldCheck;
+  const evidence = latest.evidence?.core_etfs ?? [];
+  const metricStyle: React.CSSProperties = {
+    background: 'rgba(255,255,255,0.03)',
+    border: '1px solid rgba(255,255,255,0.08)',
+    borderRadius: 8,
+    padding: '10px 12px',
+    minWidth: 132,
+    flex: 1,
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(min(280px, 100%), 1fr))',
+        gap: 14,
+      }}>
+        <div style={{
+          background: signalBg(latest.signal, latest.watch_signal),
+          border: `1px solid ${mainColor}55`,
+          borderRadius: 10,
+          padding: '16px 18px',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: mainColor, fontSize: 12, fontWeight: 700, marginBottom: 10 }}>
+            <Icon size={16} />
+            托底大盘信号
+          </div>
+          <div style={{ fontSize: 28, fontWeight: 800, color: mainColor, lineHeight: 1.15 }}>{displayLabel}</div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
+            <span style={{ fontSize: 11, padding: '4px 8px', borderRadius: 999, background: 'rgba(255,255,255,0.08)', color: 'var(--text-secondary)' }}>
+              {latest.date}
+            </span>
+            <span style={{ fontSize: 11, padding: '4px 8px', borderRadius: 999, background: 'rgba(255,255,255,0.08)', color: 'var(--text-secondary)' }}>
+              置信度 {confidenceLabel(latest.confidence)}
+            </span>
+            <span style={{ fontSize: 11, padding: '4px 8px', borderRadius: 999, background: 'rgba(255,255,255,0.08)', color: 'var(--text-secondary)' }}>
+              {dataQualityLabel(latest.data_quality)}
+            </span>
+          </div>
+        </div>
+        <div style={{
+          background: 'var(--bg-secondary)',
+          border: '1px solid var(--border-color)',
+          borderRadius: 10,
+          padding: '14px 16px',
+          color: 'var(--text-secondary)',
+          fontSize: 13,
+          lineHeight: 1.8,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7, color: 'var(--text-primary)', fontWeight: 700, marginBottom: 6 }}>
+            <Activity size={15} />
+            证据摘要
+          </div>
+          {latest.evidence?.explanation ?? '当前信号缺少解释数据。'}
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        <div style={metricStyle}>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>篮子份额变化</div>
+          <div style={{ fontSize: 18, fontWeight: 800, color: flowColor(latest.basket_delta_share) }}>{fmtYiFen(latest.basket_delta_share)}</div>
+        </div>
+        <div style={metricStyle}>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>估算资金</div>
+          <div style={{ fontSize: 18, fontWeight: 800, color: flowColor(latest.estimated_amount) }}>{fmtYi(latest.estimated_amount)}</div>
+        </div>
+        <div style={metricStyle}>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>20日异常度</div>
+          <div style={{ fontSize: 18, fontWeight: 800, color: signalColor(latest.signal, latest.watch_signal) }}>{fmtSigma(latest.z_score)}</div>
+        </div>
+        <div style={metricStyle}>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>20日回撤</div>
+          <div style={{ fontSize: 18, fontWeight: 800, color: flowColor(latest.market_drawdown_20) }}>{fmtPct(latest.market_drawdown_20)}</div>
+        </div>
+      </div>
+
+      {evidence.length > 0 && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 10 }}>
+          {evidence.map(item => (
+            <div key={item.symbol} style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', borderRadius: 10, padding: '12px 14px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                <span style={{ fontSize: 12, fontWeight: 700, color: ETF_COLORS[item.symbol] || 'var(--text-primary)' }}>{item.symbol}</span>
+                <span style={{ fontSize: 11, color: item.status === 'complete' ? 'var(--text-muted)' : '#f59e0b' }}>
+                  {item.status === 'complete' ? '完整' : item.status}
+                </span>
+              </div>
+              <div style={{ marginTop: 8, fontSize: 18, fontWeight: 800, color: flowColor(item.delta_share) }}>{fmtYiFen(item.delta_share)}</div>
+              <div style={{ marginTop: 3, fontSize: 11, color: 'var(--text-muted)' }}>
+                总份额 {item.total_share !== null ? `${item.total_share.toFixed(2)}亿份` : '—'} · 估算 {fmtYi(item.estimated_amount)}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+
+export default function BigMoney() {
+  const [northbound, setNorthbound] = useState<NorthboundResp | null>(null);
+  const [etf, setEtf] = useState<EtfResp | null>(null);
+  const [today, setToday] = useState<TodayResp | null>(null);
+  const [intraday, setIntraday] = useState<IntradayResp | null>(null);
+  const [signals, setSignals] = useState<BigMoneySignalResp | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [backfilling, setBackfilling] = useState(false);
+  const [backfillDone, setBackfillDone] = useState(false);
+  const [nbRange, setNbRange] = useState<Range>('3Y');
+  const [etfRange, setEtfRange] = useState<Range>('ALL');
+  const [signalRange, setSignalRange] = useState<Range>('1Y');
+  const hasBackfilled = useRef(false);
+  const intradayTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const fetchIntraday = useCallback(async () => {
+    try {
+      const res = await axios.get(`${API}/api/v1/big-money/northbound/intraday`);
+      setIntraday(res.data);
+    } catch { /* silent */ }
+  }, []);
+
+  const fetchAll = useCallback(async () => {
+    try {
+      const [nbRes, etfRes, todayRes, signalRes] = await Promise.all([
+        axios.get(`${API}/api/v1/big-money/northbound`),
+        axios.get(`${API}/api/v1/big-money/etf-shares`),
+        axios.get(`${API}/api/v1/big-money/today`),
+        axios.get(`${API}/api/v1/big-money/signals?days=3650`),
+      ]);
+      setNorthbound(nbRes.data);
+      setEtf(etfRes.data);
+      setToday(todayRes.data);
+      setSignals(signalRes.data);
+
+      const hasNb = (nbRes.data.data?.length ?? 0) > 0;
+      const hasEtf = (etfRes.data.symbols?.length ?? 0) > 0;
+      if (!hasNb && !hasEtf && !hasBackfilled.current) {
+        hasBackfilled.current = true;
+        setBackfilling(true);
+        axios.post(`${API}/api/v1/big-money/backfill?northbound_history=true&etf_days=730`, null, POST_OPTS).catch(() => {});
+        setTimeout(() => fetchAll(), 45000);
+        setTimeout(() => fetchAll(), 120000);
+        setTimeout(() => { setBackfilling(false); setBackfillDone(true); }, 130000);
+      }
+    } catch (e) {
+      console.error('BigMoney fetchAll error', e);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchAll();
+    fetchIntraday();
+    // Poll intraday every 2 minutes
+    intradayTimer.current = setInterval(fetchIntraday, 2 * 60 * 1000);
+    return () => { if (intradayTimer.current) clearInterval(intradayTimer.current); };
+  }, [fetchAll, fetchIntraday]);
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await axios.post(`${API}/api/v1/big-money/refresh`, null, POST_OPTS);
+    } finally {
+      setRefreshing(false);
+    }
+    await fetchIntraday();
+    setTimeout(() => fetchAll(), 15000);
+  };
+
+  const handleBackfillHistory = async () => {
+    setBackfilling(true);
+    try {
+      await axios.post(`${API}/api/v1/big-money/backfill?northbound_history=true&etf_days=730`, null, POST_OPTS);
+    } finally {
+      setBackfilling(false);
+    }
+    setTimeout(() => fetchAll(), 45000);
+    setTimeout(() => fetchAll(), 120000);
+  };
+
+  const nbFiltered = filterByRange(northbound?.data ?? [], nbRange);
+  const huijinEvents = northbound?.huijin_events ?? [];
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+        <div>
+          <h1 style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>大资金动向</h1>
+          <p style={{ fontSize: 13, color: 'var(--text-muted)', margin: '4px 0 0' }}>
+            北向资金（沪深港通）· 国家队 ETF 份额监控
+          </p>
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            onClick={handleBackfillHistory}
+            disabled={backfilling}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6, padding: '7px 14px',
+              borderRadius: 8, fontSize: 12, border: '1px solid var(--border-color)',
+              background: 'var(--bg-secondary)', color: 'var(--text-secondary)',
+              cursor: backfilling ? 'not-allowed' : 'pointer', opacity: backfilling ? 0.6 : 1,
+            }}
+          >
+            <Database size={14} />{backfilling ? '回填中…' : '导入历史'}
+          </button>
+          <button
+            onClick={handleRefresh}
+            disabled={refreshing}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6, padding: '7px 14px',
+              borderRadius: 8, fontSize: 12,
+              border: `1px solid ${refreshing ? 'var(--border-color)' : 'rgba(99,102,241,0.4)'}`,
+              background: refreshing ? 'var(--bg-secondary)' : 'rgba(99,102,241,0.1)',
+              color: refreshing ? 'var(--text-muted)' : '#6366f1',
+              cursor: refreshing ? 'not-allowed' : 'pointer',
+            }}
+          >
+            <RefreshCw size={14} style={{ animation: refreshing ? 'spin 1s linear infinite' : 'none' }} />
+            {refreshing ? '刷新中…' : '刷新今日'}
+          </button>
+        </div>
+      </div>
+
+      {backfilling && (
+        <div style={{ padding: '10px 16px', borderRadius: 8, fontSize: 12, background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.2)', color: '#6366f1' }}>
+          正在后台导入历史数据（北向资金历史 + ETF 份额/托底信号近2年）…完成后页面将自动刷新。
+        </div>
+      )}
+      {backfillDone && (
+        <div style={{ padding: '10px 16px', borderRadius: 8, fontSize: 12, background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.2)', color: '#10b981' }}>
+          历史数据导入完成，图表已更新。
+        </div>
+      )}
+
+      {loading ? (
+        <div style={{ textAlign: 'center', padding: 60, color: 'var(--text-muted)', fontSize: 13 }}>加载中…</div>
+      ) : (
+        <>
+          {/* Today snapshot */}
+          <SectionCard title="今日快照" subtitle={today?.northbound.date ? `数据日期：${today.northbound.date}` : undefined}>
+            <TodayCards today={today} />
+          </SectionCard>
+
+          <SectionCard
+            title="托底大盘信号"
+            subtitle="主信号保守，观察提示敏感；依据 510050 / 510300 / 510500 份额变化"
+          >
+            <SupportSignalPanel latest={signals?.latest ?? null} />
+          </SectionCard>
+
+          <SectionCard
+            title="信号证据"
+            subtitle="核心 ETF 篮子每日份额变化与 20 日滚动异常度"
+            action={<RangeButtons value={signalRange} onChange={setSignalRange} />}
+          >
+            <SignalEvidenceChart data={signals?.data ?? []} range={signalRange} />
+            {signals?.message && (
+              <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-muted)', textAlign: 'center' }}>{signals.message}</div>
+            )}
+          </SectionCard>
+
+          <SectionCard
+            title="今日盘中走势"
+            subtitle={intraday?.source_broken ? '数据源不可用' : intraday?.date ? `${intraday.date} · 分钟级累计净买额（亿元）` : '交易日 9:30–15:00'}
+          >
+            <div style={{ display: 'flex', gap: 16, marginBottom: 10, flexWrap: 'wrap' }}>
+              {[['#10b981', '北向合计'], ['#6366f1', '沪股通'], ['#f59e0b', '深股通']].map(([color, label]) => (
+                <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+                  <div style={{ width: 16, height: 3, background: color, borderRadius: 2 }} />
+                  <span style={{ color: 'var(--text-secondary)' }}>{label}</span>
+                </div>
+              ))}
+            </div>
+            <IntradayChart
+              data={intraday?.data ?? []}
+              date={intraday?.date ?? null}
+              sourceBroken={intraday?.source_broken}
+              message={intraday?.message}
+            />
+          </SectionCard>
+
+          {/* Northbound history */}
+          <SectionCard
+            title="北向资金净买额趋势"
+            subtitle="沪股通 + 深股通合计，亿元，正值 = 净流入 A 股"
+            action={<RangeButtons value={nbRange} onChange={setNbRange} />}
+          >
+            <NorthboundChart data={nbFiltered} huijinEvents={huijinEvents} />
+            {northbound?.message && (
+              <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-muted)', textAlign: 'center' }}>{northbound.message}</div>
+            )}
+            {huijinEvents.length > 0 && nbFiltered.length > 0 && (
+              <div style={{ marginTop: 10, display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+                {huijinEvents.map(ev => (
+                  <div key={ev.date} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#f59e0b' }}>
+                    <div style={{ width: 20, height: 2, background: '#f59e0b', borderRadius: 1 }} />
+                    {ev.date} {ev.label}
+                  </div>
+                ))}
+              </div>
+            )}
+          </SectionCard>
+
+          {/* ETF shares */}
+          <SectionCard
+            title="国家队 ETF 份额监控"
+            subtitle="510050 / 510300 / 510500 基金份额（亿份）· 份额突增 = 推断汇金入场"
+            action={<RangeButtons value={etfRange} onChange={setEtfRange} />}
+          >
+            <div style={{ display: 'flex', gap: 16, marginBottom: 12, flexWrap: 'wrap' }}>
+              {Object.entries(ETF_COLORS).map(([sym, color]) => (
+                <div key={sym} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+                  <div style={{ width: 16, height: 3, background: color, borderRadius: 2 }} />
+                  <span style={{ color: 'var(--text-secondary)' }}>{sym}</span>
+                </div>
+              ))}
+            </div>
+            <EtfShareChart symbols={etf?.symbols ?? []} etfData={etf?.data ?? {}} range={etfRange} />
+            {etf?.message && (
+              <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-muted)', textAlign: 'center' }}>{etf.message}</div>
+            )}
+          </SectionCard>
+
+          {/* Note */}
+          <div style={{ padding: '10px 14px', borderRadius: 8, fontSize: 11, background: 'rgba(107,114,128,0.06)', border: '1px solid var(--border-color)', color: 'var(--text-muted)', lineHeight: 1.8 }}>
+            <strong style={{ color: 'var(--text-secondary)' }}>数据说明：</strong>
+            北向资金历史来自东方财富（有效至 2024-08-16）。
+            <span style={{ color: '#f59e0b', margin: '0 4px' }}>▲ 数据断档</span>
+            — 东方财富于 2024-08-19 更改接口字段结构，AkShare 尚未适配，历史净买额及分钟级实时数据均已不可用（约 21 个月缺口）。
+            ETF 份额来自上交所每日快照，每日盘后更新。托底信号是基于宽基 ETF 份额变化的代理判断，不代表真实持仓披露。
+          </div>
+        </>
+      )}
+    </div>
+  );
+}

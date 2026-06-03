@@ -68,6 +68,33 @@ DEFAULT_JOBS = [
         "minute": 0,
         "description": "每周同步 Sector/Industry 及龙头公司数据",
     },
+    {
+        "id": "update_sector_flow",
+        "name": "A股板块资金流每日更新",
+        "func": "_job_update_sector_flow",
+        "trigger_type": "cron",
+        "hour": 16,
+        "minute": 5,
+        "description": "每个交易日16:05抓取东方财富行业/概念板块资金流数据",
+    },
+    {
+        "id": "update_big_money_evening",
+        "name": "国家队托底信号盘后预警",
+        "func": "_job_update_big_money",
+        "trigger_type": "cron",
+        "hour": 20,
+        "minute": 30,
+        "description": "盘后抓取北向资金 + 核心ETF份额并计算托底大盘信号",
+    },
+    {
+        "id": "update_big_money_morning",
+        "name": "国家队托底信号开盘前确认",
+        "func": "_job_update_big_money",
+        "trigger_type": "cron",
+        "hour": 8,
+        "minute": 45,
+        "description": "开盘前确认最新核心ETF份额并更新托底大盘信号",
+    },
 ]
 
 
@@ -122,6 +149,8 @@ class DataScheduler:
             "_job_update_crypto": self._job_update_crypto,
             "_job_update_us_market": self._job_update_us_market,
             "_job_sync_sectors_weekly": self._job_sync_sectors_weekly,
+            "_job_update_sector_flow": self._job_update_sector_flow,
+            "_job_update_big_money": self._job_update_big_money,
         }
         for job_def in DEFAULT_JOBS:
             func = job_funcs[job_def["func"]]
@@ -242,8 +271,10 @@ class DataScheduler:
             price_results = incremental_update(asset_ids=asset_ids, lookback_days=5)
             results["prices"] = self._summarise_price_results(price_results)
 
-            # 3. Update VIX + CNN Fear & Greed indicators
-            indicator_results = self._update_indicators_for_assets(asset_ids, ["VIX", "CNN_FEAR_GREED"])
+            # 3. Update VIX / VXN / VXD / OVX / GVZ + CNN Fear & Greed indicators
+            indicator_results = self._update_indicators_for_assets(
+                asset_ids, ["VIX", "VXN", "VXD", "OVX", "GVZ", "CNN_FEAR_GREED"]
+            )
             results["indicators"] = indicator_results
 
             self._finish_run_log(run_log, "success", results)
@@ -267,6 +298,44 @@ class DataScheduler:
             status = "success" if all(r["status"] == "success" for r in results.values()) else "partial"
             self._finish_run_log(run_log, status, results)
             logger.info("[%s] Done", job_id)
+
+        except Exception as e:
+            logger.exception("[%s] Failed", job_id)
+            self._finish_run_log(run_log, "error", results, str(e))
+
+    def _job_update_sector_flow(self):
+        """Fetch A-share industry/concept sector fund flow from 东方财富 via AkShare."""
+        job_id = "update_sector_flow"
+        run_log = self._start_run_log(job_id, "A股板块资金流每日更新")
+        results: Dict[str, Any] = {}
+
+        try:
+            from app.fetchers.akshare_fetcher import run_daily_sector_flow_job
+            results = run_daily_sector_flow_job()
+            status = "success" if results.get("industry", {}).get("fetched", 0) > 0 else "error"
+            self._finish_run_log(run_log, status, results)
+            logger.info("[%s] Done: %s", job_id, results)
+
+        except Exception as e:
+            logger.exception("[%s] Failed", job_id)
+            self._finish_run_log(run_log, "error", results, str(e))
+
+    def _job_update_big_money(self):
+        """Fetch daily big-money inputs and calculate support signal."""
+        job_id = "update_big_money"
+        run_log = self._start_run_log(job_id, "国家队托底信号更新")
+        results: Dict[str, Any] = {}
+
+        try:
+            from app.fetchers.akshare_fetcher import fetch_northbound_today, fetch_etf_shares_for_date
+            from app.services.big_money_signal import calculate_latest_signal
+
+            results["northbound"] = fetch_northbound_today()
+            results["etf_shares"] = fetch_etf_shares_for_date()
+            results["signal"] = calculate_latest_signal()
+            status = "success" if results.get("signal") else "partial"
+            self._finish_run_log(run_log, status, results)
+            logger.info("[%s] Done: %s", job_id, results)
 
         except Exception as e:
             logger.exception("[%s] Failed", job_id)
@@ -478,6 +547,10 @@ class DataScheduler:
             "update_crypto": self._job_update_crypto,
             "update_us_market": self._job_update_us_market,
             "sync_sectors_weekly": self._job_sync_sectors_weekly,
+            "update_sector_flow": self._job_update_sector_flow,
+            "update_big_money_evening": self._job_update_big_money,
+            "update_big_money_morning": self._job_update_big_money,
+            "update_big_money": self._job_update_big_money,
         }
         func = job_funcs.get(job_id)
         if not func:
