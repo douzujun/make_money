@@ -1,7 +1,7 @@
 """Big Money Flow API endpoints — northbound capital and ETF share tracking."""
 import threading
 from datetime import date, timedelta
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 from fastapi import APIRouter, Query, HTTPException
 
@@ -295,23 +295,110 @@ def get_northbound_intraday():
 @router.post("/refresh")
 def refresh_big_money():
     """
-    Manually trigger today's northbound capital + ETF share fetch (background).
+    Manually trigger today's northbound capital + ETF share fetch.
+
+    Returns a concrete success/partial/error result so the UI can show whether
+    the refresh actually produced current data.
     """
     from app.fetchers.akshare_fetcher import fetch_northbound_today, fetch_etf_shares_for_date
     from app.services.big_money_signal import calculate_latest_signal
 
-    def _run():
-        import logging
-        log = logging.getLogger("big-money")
-        r1 = fetch_northbound_today()
-        log.info("northbound today: %s", r1)
-        r2 = fetch_etf_shares_for_date()
-        log.info("etf shares today: %s", r2)
-        r3 = calculate_latest_signal()
-        log.info("big money signal latest: %s", r3)
+    def _latest_dates() -> Dict[str, Optional[str]]:
+        db = SessionLocal()
+        try:
+            latest_nb = db.query(NorthboundFlow.date).order_by(NorthboundFlow.date.desc()).first()
+            latest_etf = db.query(EtfShareRecord.date).order_by(EtfShareRecord.date.desc()).first()
+            latest_signal = db.query(BigMoneySignal.date).order_by(BigMoneySignal.date.desc()).first()
+            return {
+                "northbound": latest_nb[0].isoformat() if latest_nb else None,
+                "etf_shares": latest_etf[0].isoformat() if latest_etf else None,
+                "signal": latest_signal[0].isoformat() if latest_signal else None,
+            }
+        finally:
+            db.close()
 
-    threading.Thread(target=_run, daemon=True, name="big-money-refresh").start()
-    return {"message": "今日北向资金 + ETF 份额抓取已在后台启动，约 15 秒后刷新可见新数据"}
+    today_str = date.today().isoformat()
+    before = _latest_dates()
+    details: List[Dict[str, Any]] = []
+
+    try:
+        r1 = fetch_northbound_today()
+        after_nb = _latest_dates()["northbound"]
+        details.append({
+            "key": "northbound",
+            "label": "北向资金",
+            "status": "success" if after_nb == today_str and r1.get("errors", 0) == 0 else "warning",
+            "latest_date": after_nb,
+            "result": r1,
+            "message": "已更新到今天" if after_nb == today_str else "未更新到今天，可能是数据源未返回当日数据",
+        })
+    except Exception as e:
+        details.append({
+            "key": "northbound",
+            "label": "北向资金",
+            "status": "error",
+            "latest_date": before["northbound"],
+            "message": f"刷新失败: {e}",
+        })
+
+    try:
+        r2 = fetch_etf_shares_for_date()
+        after_etf = _latest_dates()["etf_shares"]
+        details.append({
+            "key": "etf_shares",
+            "label": "ETF 份额",
+            "status": "success" if after_etf == today_str and r2.get("errors", 0) == 0 else "warning",
+            "latest_date": after_etf,
+            "result": r2,
+            "message": "已更新到今天" if after_etf == today_str else "未更新到今天，上交所 ETF 份额快照可能尚未发布",
+        })
+    except Exception as e:
+        details.append({
+            "key": "etf_shares",
+            "label": "ETF 份额",
+            "status": "error",
+            "latest_date": before["etf_shares"],
+            "message": f"刷新失败: {e}",
+        })
+
+    try:
+        signal = calculate_latest_signal()
+        after_signal = _latest_dates()["signal"]
+        details.append({
+            "key": "signal",
+            "label": "托底信号",
+            "status": "success" if after_signal == today_str and signal else "warning",
+            "latest_date": after_signal,
+            "signal_label": signal.get("signal_label") if signal else None,
+            "watch_label": signal.get("watch_label") if signal else None,
+            "message": "已更新到今天" if after_signal == today_str else "信号按最新 ETF 份额日期计算，尚未到今天",
+        })
+    except Exception as e:
+        details.append({
+            "key": "signal",
+            "label": "托底信号",
+            "status": "error",
+            "latest_date": before["signal"],
+            "message": f"计算失败: {e}",
+        })
+
+    if any(item["status"] == "error" for item in details):
+        status = "error"
+        message = "刷新失败，部分数据源或信号计算出错"
+    elif any(item["status"] == "warning" for item in details):
+        status = "partial"
+        message = "刷新部分成功：部分数据未更新到今天"
+    else:
+        status = "success"
+        message = "刷新成功：数据已更新到今天"
+
+    return {
+        "status": status,
+        "message": message,
+        "target_date": today_str,
+        "latest_dates": _latest_dates(),
+        "details": details,
+    }
 
 
 @router.post("/backfill")

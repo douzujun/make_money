@@ -24,6 +24,22 @@ interface TodayResp {
 }
 interface IntradayRow { time: string; sh_hk: number | null; sz_hk: number | null; total: number | null; }
 interface IntradayResp { date: string | null; data: IntradayRow[]; source_broken?: boolean; message?: string; }
+interface RefreshDetail {
+  key: string;
+  label: string;
+  status: 'success' | 'warning' | 'error';
+  latest_date: string | null;
+  message: string;
+  signal_label?: string | null;
+  watch_label?: string | null;
+}
+interface RefreshResp {
+  status: 'success' | 'partial' | 'error';
+  message: string;
+  target_date: string;
+  latest_dates: Record<string, string | null>;
+  details: RefreshDetail[];
+}
 interface SignalEtfEvidence {
   symbol: string;
   name: string;
@@ -127,6 +143,11 @@ const dataQualityLabel = (v: string) => ({
   partial_insufficient_baseline: '数据/基线不足',
   unknown: '未知',
 }[v] || v);
+const refreshStatusStyle = (status: RefreshResp['status']): React.CSSProperties => {
+  if (status === 'success') return { background: 'rgba(16,185,129,0.10)', border: '1px solid rgba(16,185,129,0.28)', color: '#10b981' };
+  if (status === 'error') return { background: 'rgba(239,68,68,0.10)', border: '1px solid rgba(239,68,68,0.30)', color: '#ef4444' };
+  return { background: 'rgba(245,158,11,0.10)', border: '1px solid rgba(245,158,11,0.30)', color: '#f59e0b' };
+};
 
 const ETF_COLORS: Record<string, string> = {
   '510050': '#6366f1', '510300': '#f59e0b', '510500': '#06b6d4',
@@ -537,6 +558,7 @@ export default function BigMoney() {
   const [signals, setSignals] = useState<BigMoneySignalResp | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [refreshResult, setRefreshResult] = useState<RefreshResp | null>(null);
   const [backfilling, setBackfilling] = useState(false);
   const [backfillDone, setBackfillDone] = useState(false);
   const [nbRange, setNbRange] = useState<Range>('3Y');
@@ -592,13 +614,15 @@ export default function BigMoney() {
 
   const handleRefresh = async () => {
     setRefreshing(true);
+    setRefreshResult(null);
     try {
-      await axios.post(`${API}/api/v1/big-money/refresh`, null, POST_OPTS);
+      const res = await axios.post(`${API}/api/v1/big-money/refresh`, null, { timeout: 45000 });
+      setRefreshResult(res.data);
+      await fetchAll();
     } finally {
       setRefreshing(false);
     }
     await fetchIntraday();
-    setTimeout(() => fetchAll(), 15000);
   };
 
   const handleBackfillHistory = async () => {
@@ -665,6 +689,23 @@ export default function BigMoney() {
       {backfillDone && (
         <div style={{ padding: '10px 16px', borderRadius: 8, fontSize: 12, background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.2)', color: '#10b981' }}>
           历史数据导入完成，图表已更新。
+        </div>
+      )}
+      {refreshResult && (
+        <div style={{ padding: '10px 16px', borderRadius: 8, fontSize: 12, ...refreshStatusStyle(refreshResult.status) }}>
+          <div style={{ fontWeight: 700, marginBottom: 6 }}>
+            {refreshResult.message}（目标日期：{refreshResult.target_date}）
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+            {refreshResult.details.map(item => (
+              <span key={item.key} style={{ color: 'var(--text-secondary)' }}>
+                <strong style={{ color: item.status === 'success' ? '#10b981' : item.status === 'error' ? '#ef4444' : '#f59e0b' }}>
+                  {item.label}
+                </strong>
+                ：{item.latest_date ?? '无数据'} · {item.message}
+              </span>
+            ))}
+          </div>
         </div>
       )}
 

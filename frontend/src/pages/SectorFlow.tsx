@@ -58,6 +58,7 @@ interface SignalData {
 
 type ViewMode = 'amount' | 'ratio' | 'change';
 type DataSource = 'auto' | 'eastmoney' | 'ths';
+type HeatmapSortMode = 'default' | 'inflow' | 'signal';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -229,6 +230,7 @@ export default function SectorFlow() {
   const [days, setDays] = useState(20);
   const [selectedSectors, setSelectedSectors] = useState<string[]>([]);
   const [viewMode, setViewMode] = useState<ViewMode>('change');
+  const [heatmapSort, setHeatmapSort] = useState<HeatmapSortMode>('inflow');
   const [dataSource, setDataSource] = useState<DataSource>('auto');
   const [lastSource, setLastSource] = useState('');
   const [loading, setLoading] = useState(true);
@@ -335,6 +337,16 @@ export default function SectorFlow() {
       latestInflow[name] = sorted[0]?.net_inflow_main ?? null;
     }
   }
+  const signalScore = new Map(signals.map(s => [s.sector_name, s.score]));
+  const sortedHeatmapSectors = [...allSectors].sort((a, b) => {
+    if (heatmapSort === 'signal') {
+      return (signalScore.get(b) ?? -Infinity) - (signalScore.get(a) ?? -Infinity);
+    }
+    if (heatmapSort === 'inflow') {
+      return (latestInflow[b] ?? -Infinity) - (latestInflow[a] ?? -Infinity);
+    }
+    return a.localeCompare(b, 'zh-CN');
+  });
 
   const hasData = industryData && allSectors.length > 0;
   const topSignals = signals.slice(0, 5);
@@ -540,7 +552,23 @@ export default function SectorFlow() {
               <h3 style={{ fontSize: '14px', fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>
                 行业热力图 · 最新交易日主力净流入
               </h3>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                <div style={{ display: 'flex', borderRadius: '8px', overflow: 'hidden', border: '1px solid var(--border-color)' }}>
+                  {([
+                    { val: 'inflow', label: '按流入' },
+                    { val: 'signal', label: '按看多' },
+                    { val: 'default', label: '默认' },
+                  ] as { val: HeatmapSortMode; label: string }[]).map(({ val, label }) => (
+                    <button key={val} onClick={() => setHeatmapSort(val)} style={{
+                      padding: '4px 10px', fontSize: '12px', fontWeight: 600, border: 'none', cursor: 'pointer',
+                      background: heatmapSort === val ? '#6366f1' : 'var(--bg-secondary)',
+                      color: heatmapSort === val ? 'white' : 'var(--text-secondary)',
+                      borderRight: val !== 'default' ? '1px solid var(--border-color)' : 'none',
+                    }}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
                 {selectedSectors.length > 0 && (
                   <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
                     已选 {selectedSectors.length}/{allSectors.length}
@@ -567,10 +595,10 @@ export default function SectorFlow() {
               </div>
             </div>
             <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: '0 0 16px' }}>
-              点击板块切换选中 · 全选自动切换为占比视图 · 红色=流入 绿色=流出（A股配色）
+              点击板块切换选中 · 当前排序：{heatmapSort === 'signal' ? '看多信号分由高到低' : heatmapSort === 'inflow' ? '主力净流入由高到低' : '行业名称'} · 红色=流入 绿色=流出（A股配色）
             </p>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-              {allSectors.map(name => (
+              {sortedHeatmapSectors.map(name => (
                 <HeatCell
                   key={name}
                   name={name}
