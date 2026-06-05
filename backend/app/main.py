@@ -14,6 +14,7 @@ from app.models.indicator import Indicator, IndicatorTemplate
 from app.models.admin import Admin
 from app.models.big_money import NorthboundFlow, EtfShareRecord, BigMoneySignal  # noqa: F401
 from app.models.backtest import EtfPriceCache  # noqa: F401
+from app.models.portfolio import PortfolioSnapshot, PortfolioHolding  # noqa: F401
 from app.indicators.btc_fear_greed import init_btc_fear_greed_targets
 from app.indicators.cnn_fear_greed import init_cnn_fear_greed_targets
 from app.indicators.ma200 import init_ma200_targets
@@ -34,6 +35,31 @@ logging.basicConfig(
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
+
+
+def ensure_lightweight_schema_updates():
+    """Apply small SQLite-safe schema additions for non-Alembic local upgrades."""
+    with engine.begin() as conn:
+        dialect = conn.dialect.name
+        if dialect != "sqlite":
+            return
+        tables = {row[0] for row in conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        if "portfolio_holdings" not in tables:
+            return
+        columns = {row[1] for row in conn.exec_driver_sql(
+            "PRAGMA table_info(portfolio_holdings)"
+        ).fetchall()}
+        if "fund_code" not in columns:
+            conn.exec_driver_sql("ALTER TABLE portfolio_holdings ADD COLUMN fund_code VARCHAR(20)")
+        if "profit_amount" not in columns:
+            conn.exec_driver_sql("ALTER TABLE portfolio_holdings ADD COLUMN profit_amount FLOAT")
+        if "profit_rate" not in columns:
+            conn.exec_driver_sql("ALTER TABLE portfolio_holdings ADD COLUMN profit_rate FLOAT")
+
+
+ensure_lightweight_schema_updates()
 
 # Initialize indicator templates and default indicators
 def init_indicators():

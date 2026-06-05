@@ -10,9 +10,12 @@ router = APIRouter(prefix="/backtest", tags=["backtest"])
 BACKTEST_ASSETS = [
     {"symbol": "510300", "name": "沪深300ETF", "category": "A股大盘", "since": "2012"},
     {"symbol": "510050", "name": "上证50ETF",  "category": "A股蓝筹", "since": "2004"},
+    {"symbol": "510500", "name": "中证500ETF",  "category": "A股中盘", "since": "2013"},
     {"symbol": "159915", "name": "创业板ETF",  "category": "A股成长", "since": "2010"},
+    {"symbol": "513100", "name": "纳指ETF",    "category": "海外宽基", "since": "2013"},
     {"symbol": "511010", "name": "国债ETF",    "category": "中债",    "since": "2013"},
     {"symbol": "518880", "name": "黄金ETF华安", "category": "黄金",    "since": "2013"},
+    {"symbol": "CASH",   "name": "现金/货币基金", "category": "现金",  "since": "synthetic"},
 ]
 
 PRESET_SCENARIOS = [
@@ -45,6 +48,18 @@ PRESET_SCENARIOS = [
         "name": "红利稳健",
         "description": "上证50蓝筹（工农中建+茅台）为核心，历史分红稳定，配合债券和黄金，五个预设中波动率最低。",
         "weights": {"510050": 0.50, "511010": 0.30, "518880": 0.20},
+    },
+    {
+        "id": "user_target",
+        "name": "你的目标框架",
+        "description": "基金核心仓 60% + 黄金防守仓 25% + 现金机动仓 15%。A股宽基为核心，海外宽基辅助，行业主题严格限额。",
+        "weights": {"510300": 0.25, "510500": 0.10, "513100": 0.15, "159915": 0.10, "518880": 0.25, "CASH": 0.15},
+    },
+    {
+        "id": "user_snapshot_proxy",
+        "name": "当前截图代理",
+        "description": "按支付宝截图与现金信息粗略映射：黄金、现金偏高，A股宽基偏低，主题/商品用中证500与创业板代理。仅用于方向性回测。",
+        "weights": {"510300": 0.01, "510500": 0.10, "159915": 0.11, "513100": 0.07, "518880": 0.26, "CASH": 0.45},
     },
 ]
 
@@ -82,6 +97,9 @@ def get_price_status():
     try:
         result = {}
         for asset in BACKTEST_ASSETS:
+            if asset["symbol"] == "CASH":
+                result[asset["symbol"]] = {"name": asset["name"], "cached_rows": 9999}
+                continue
             count = (
                 db.query(EtfPriceCache)
                 .filter(EtfPriceCache.symbol == asset["symbol"])

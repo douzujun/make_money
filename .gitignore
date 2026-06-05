@@ -51,3 +51,4 @@ frontend/*.tsbuildinfo
 # Lock files (for reproducible builds)
 !backend/uv.lock
 .gstack/
+.omc/

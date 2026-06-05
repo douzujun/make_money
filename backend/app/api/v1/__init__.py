@@ -1,7 +1,7 @@
 """API router package."""
 from fastapi import APIRouter, Depends
 
-from app.api.v1 import auth, assets, prices, update, indicators, scheduler, binance, dashboard, sector_flow, big_money, backtest
+from app.api.v1 import auth, assets, prices, update, indicators, scheduler, binance, dashboard, sector_flow, big_money, backtest, portfolio
 from app.api.v1.auth import get_current_admin
 
 api_router = APIRouter(prefix="/api/v1")
@@ -17,3 +17,4 @@ api_router.include_router(dashboard.router, dependencies=[Depends(get_current_ad
 api_router.include_router(sector_flow.router, dependencies=[Depends(get_current_admin)])
 api_router.include_router(big_money.router, dependencies=[Depends(get_current_admin)])
 api_router.include_router(backtest.router, dependencies=[Depends(get_current_admin)])
+api_router.include_router(portfolio.router, dependencies=[Depends(get_current_admin)])

@@ -61,9 +61,12 @@ const COLOR_DOWN = '#ef4444';
 const ASSET_COLORS: Record<string, string> = {
   '510300': '#6366f1',
   '510050': '#8b5cf6',
+  '510500': '#0ea5e9',
   '159915': '#06b6d4',
+  '513100': '#a855f7',
   '511010': '#10b981',
   '518880': '#f59e0b',
+  CASH: '#64748b',
 };
 
 // ── Hint tooltip ───────────────────────────────────────────────────────────
@@ -433,7 +436,7 @@ function NavChart({
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 const EMPTY_WEIGHTS = (): Record<string, number> =>
-  ({ '510300': 0, '510050': 0, '159915': 0, '511010': 0, '518880': 0 });
+  ({ '510300': 0, '510050': 0, '510500': 0, '159915': 0, '513100': 0, '511010': 0, '518880': 0, CASH: 0 });
 
 const defaultConfig = (presets: Preset[], id: string): PConfig => {
   const p = presets.find(x => x.id === id);
@@ -460,7 +463,7 @@ export default function Backtest() {
   const [result, setResult] = useState<BacktestResponse | null>(null);
   const [error, setError] = useState('');
 
-  const hasData = Object.values(priceStatus).some(v => v.cached_rows > 0);
+  const hasData = Object.entries(priceStatus).some(([sym, v]) => sym !== 'CASH' && v.cached_rows > 0);
 
   const loadMeta = useCallback(async () => {
     const token = localStorage.getItem('token');

@@ -8,6 +8,7 @@ from app.models.sector import Sector, Industry, SectorTopCompany, IndustryTopCom
 from app.models.sector_flow import SectorFundFlow
 from app.models.admin import Admin
 from app.models.big_money import NorthboundFlow, EtfShareRecord, BigMoneySignal
+from app.models.portfolio import PortfolioSnapshot, PortfolioHolding
 
 __all__ = [
     "Base", "Asset", "PriceData",
@@ -17,4 +18,5 @@ __all__ = [
     "SectorFundFlow",
     "Admin",
     "NorthboundFlow", "EtfShareRecord", "BigMoneySignal",
+    "PortfolioSnapshot", "PortfolioHolding",
 ]

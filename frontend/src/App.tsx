@@ -14,6 +14,7 @@ import InvestmentDashboard from '@/pages/InvestmentDashboard';
 import SectorFlow from '@/pages/SectorFlow';
 import BigMoney from '@/pages/BigMoney';
 import Backtest from '@/pages/Backtest';
+import PortfolioCenter from '@/pages/PortfolioCenter';
 
 // Layouts
 import MainLayout from '@/layouts/MainLayout';
@@ -39,6 +40,8 @@ function RouteTitleManager() {
       pageTitle = '大资金动向';
     } else if (path === '/backtest') {
       pageTitle = '组合回测';
+    } else if (path === '/portfolio-center') {
+      pageTitle = '组合配置中枢';
     } else if (path === '/assets') {
       pageTitle = '标的列表';
     } else if (path.startsWith('/assets/')) {
@@ -106,6 +109,7 @@ function App() {
               <Route path="investment" element={<InvestmentDashboard />} />
               <Route path="sector-flow" element={<SectorFlow />} />
               <Route path="big-money" element={<BigMoney />} />
+              <Route path="portfolio-center" element={<PortfolioCenter />} />
               <Route path="backtest" element={<Backtest />} />
               <Route path="assets" element={<Assets />} />
               <Route path="assets/:id" element={<AssetDetail />} />

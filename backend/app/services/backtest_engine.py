@@ -41,6 +41,14 @@ def load_prices(symbols: List[str], start_date: str, end_date: str) -> pd.DataFr
         db.close()
 
 
+def _cash_nav(index: pd.DatetimeIndex) -> pd.Series:
+    """Synthetic cash curve using the module's approximate risk-free rate."""
+    if len(index) == 0:
+        return pd.Series(dtype=float)
+    days = (index - index[0]).days
+    return pd.Series((1.0 + RISK_FREE_RATE) ** (days / 365.25), index=index)
+
+
 def run_backtest(
     weights: Dict[str, float],
     rebalance_freq: str,
@@ -54,14 +62,22 @@ def run_backtest(
     rebalance_freq: "1M" or "1Q"
     Returns nav_curve + metrics dict.
     """
-    symbols = list(weights.keys())
-    prices = load_prices(symbols, start_date, end_date)
+    symbols = [s for s, w in weights.items() if w > 0 and s != "CASH"]
+    cash_weight = weights.get("CASH", 0.0)
+    prices = load_prices(symbols, start_date, end_date) if symbols else pd.DataFrame()
+
+    if cash_weight > 0:
+        if prices.empty:
+            index = pd.date_range(start=start_date, end=end_date, freq="B")
+        else:
+            index = prices.index
+        prices["CASH"] = _cash_nav(index)
 
     if prices.empty:
         return {"error": "no_data", "nav_curve": [], "metrics": {}}
 
     # Drop symbols with no data
-    available = [s for s in symbols if s in prices.columns]
+    available = [s for s, w in weights.items() if w > 0 and s in prices.columns]
     if not available:
         return {"error": "no_data", "nav_curve": [], "metrics": {}}
 

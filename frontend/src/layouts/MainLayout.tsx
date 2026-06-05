@@ -3,6 +3,7 @@ import { Outlet, Link, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, Database, Activity, Star,
   Bell, BarChart3, LogOut, LineChart, BarChart2, ChevronRight, Menu, X, TrendingUp, PieChart,
+  WalletCards,
 } from 'lucide-react';
 import { useAuthStore } from '@/stores/auth';
 
@@ -11,6 +12,7 @@ const menuItems = [
   { path: '/investment',  label: '投资仪表盘', icon: LineChart },
   { path: '/sector-flow', label: '板块资金流', icon: BarChart2 },
   { path: '/big-money',   label: '大资金动向', icon: TrendingUp },
+  { path: '/portfolio-center', label: '组合配置中枢', icon: WalletCards },
   { path: '/backtest',    label: '组合回测',   icon: PieChart },
   { path: '/assets',      label: '标的列表',  icon: Database },
   { path: '/watchlist',   label: '关注列表',  icon: Star },
