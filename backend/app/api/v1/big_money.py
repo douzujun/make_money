@@ -2,6 +2,7 @@
 import threading
 from datetime import date, timedelta
 from typing import List, Optional, Dict, Any
+from statistics import mean, pstdev
 
 from fastapi import APIRouter, Query, HTTPException
 
@@ -15,6 +16,56 @@ HUIJIN_EVENTS = [
     {"date": "2023-10-23", "label": "汇金增持公告"},
     {"date": "2024-02-06", "label": "汇金再次增持"},
 ]
+
+
+def _pct_change(current: Optional[float], previous: Optional[float]) -> Optional[float]:
+    if current is None or previous in (None, 0):
+        return None
+    return (current - previous) / previous * 100
+
+
+def _round(value: Optional[float], digits: int = 2) -> Optional[float]:
+    if value is None:
+        return None
+    return round(float(value), digits)
+
+
+def _risk_preference_signal(
+    bei_return_5d: Optional[float],
+    relative_return_5d: Optional[float],
+    volume_z_score: Optional[float],
+    drawdown_20d: Optional[float],
+) -> Dict[str, str]:
+    volume_expansion = volume_z_score is not None and volume_z_score >= 1.0
+    strong_relative = relative_return_5d is not None and relative_return_5d >= 3.0
+    weak_relative = relative_return_5d is not None and relative_return_5d <= -3.0
+    strong_return = bei_return_5d is not None and bei_return_5d >= 5.0
+    weak_return = bei_return_5d is not None and bei_return_5d <= -5.0
+    deep_drawdown = drawdown_20d is not None and drawdown_20d <= -8.0
+
+    if strong_return and strong_relative and volume_expansion:
+        return {
+            "signal": "accumulate_watch",
+            "label": "加仓观察",
+            "summary": "北证50放量跑赢沪深300，风险偏好扩散",
+        }
+    if weak_return or (weak_relative and deep_drawdown):
+        return {
+            "signal": "reduce_watch",
+            "label": "减仓观察",
+            "summary": "北证50弱于核心大盘，小盘风险偏好退潮",
+        }
+    if strong_relative and (bei_return_5d or 0) > 0:
+        return {
+            "signal": "risk_on_watch",
+            "label": "风险偏好观察",
+            "summary": "北证50相对走强，但量能或绝对涨幅仍需确认",
+        }
+    return {
+        "signal": "neutral",
+        "label": "中性",
+        "summary": "北交所风险偏好未出现强触发",
+    }
 
 
 @router.get("/northbound")
@@ -186,6 +237,111 @@ def get_big_money_signals(days: int = Query(default=365, ge=5, le=3650)):
         }
     finally:
         db.close()
+
+
+@router.get("/bei50-risk")
+def get_bei50_risk(days: int = Query(default=180, ge=30, le=1000)):
+    """
+    Return 北证50 risk-preference evidence.
+
+    This is an auxiliary small-cap sentiment signal, not part of the
+    state-support core ETF basket.
+    """
+    try:
+        import akshare as ak
+        import pandas as pd
+
+        bei_df = ak.stock_zh_index_daily(symbol="bj899050")
+        hs_df = ak.stock_zh_index_daily(symbol="sh000300")
+        if bei_df.empty or hs_df.empty:
+            return {
+                "data": [],
+                "latest": None,
+                "message": "暂无北证50或沪深300指数数据",
+            }
+
+        def _prep(df):
+            out = df.copy()
+            out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+            out["close"] = pd.to_numeric(out["close"], errors="coerce")
+            out["volume"] = pd.to_numeric(out["volume"], errors="coerce")
+            return out.dropna(subset=["date", "close"]).sort_values("date")
+
+        bei = _prep(bei_df).rename(columns={"close": "bei50_close", "volume": "bei50_volume"})
+        hs = _prep(hs_df).rename(columns={"close": "hs300_close", "volume": "hs300_volume"})
+        merged = pd.merge(
+            bei[["date", "bei50_close", "bei50_volume"]],
+            hs[["date", "hs300_close"]],
+            on="date",
+            how="inner",
+        ).sort_values("date")
+
+        rows: List[Dict[str, Any]] = []
+        records = merged.to_dict("records")
+        for idx, row in enumerate(records):
+            bei_close = float(row["bei50_close"])
+            hs_close = float(row["hs300_close"])
+            prev = records[idx - 1] if idx >= 1 else None
+            prev5 = records[idx - 5] if idx >= 5 else None
+            recent20 = records[max(0, idx - 19): idx + 1]
+            previous20 = records[max(0, idx - 20): idx]
+
+            bei_return_1d = _pct_change(bei_close, float(prev["bei50_close"])) if prev else None
+            hs_return_1d = _pct_change(hs_close, float(prev["hs300_close"])) if prev else None
+            bei_return_5d = _pct_change(bei_close, float(prev5["bei50_close"])) if prev5 else None
+            hs_return_5d = _pct_change(hs_close, float(prev5["hs300_close"])) if prev5 else None
+            relative_return_5d = (
+                bei_return_5d - hs_return_5d
+                if bei_return_5d is not None and hs_return_5d is not None
+                else None
+            )
+            volume_values = [float(x["bei50_volume"]) for x in previous20 if x.get("bei50_volume") is not None]
+            volume_mean = mean(volume_values) if volume_values else None
+            volume_std = pstdev(volume_values) if len(volume_values) >= 2 else None
+            volume_z_score = None
+            if volume_mean is not None and volume_std and volume_std > 1e-9 and row.get("bei50_volume") is not None:
+                volume_z_score = (float(row["bei50_volume"]) - volume_mean) / volume_std
+            high_20 = max(float(x["bei50_close"]) for x in recent20) if recent20 else None
+            drawdown_20d = _pct_change(bei_close, high_20) if high_20 else None
+
+            signal = _risk_preference_signal(
+                bei_return_5d=bei_return_5d,
+                relative_return_5d=relative_return_5d,
+                volume_z_score=volume_z_score,
+                drawdown_20d=drawdown_20d,
+            )
+            rows.append({
+                "date": row["date"].isoformat(),
+                "bei50_close": _round(bei_close, 3),
+                "hs300_close": _round(hs_close, 3),
+                "bei50_return_1d": _round(bei_return_1d),
+                "hs300_return_1d": _round(hs_return_1d),
+                "bei50_return_5d": _round(bei_return_5d),
+                "hs300_return_5d": _round(hs_return_5d),
+                "relative_return_5d": _round(relative_return_5d),
+                "volume_z_score": _round(volume_z_score),
+                "drawdown_20d": _round(drawdown_20d),
+                "signal": signal["signal"],
+                "label": signal["label"],
+                "summary": signal["summary"],
+            })
+
+        trimmed = rows[-days:]
+        return {
+            "data": trimmed,
+            "latest": trimmed[-1] if trimmed else None,
+            "method": {
+                "index": "北证50成份指数 899050",
+                "benchmark": "沪深300 sh000300",
+                "main_signal": "辅助风险偏好，不纳入国家队托底主信号",
+                "rules": [
+                    "5日涨幅 >= 5% 且相对沪深300 >= 3% 且成交量 >= +1σ：加仓观察",
+                    "5日跌幅 <= -5% 或相对沪深300 <= -3% 且20日回撤 <= -8%：减仓观察",
+                ],
+            },
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"北证50风险偏好数据获取失败: {e}")
 
 
 @router.get("/today")

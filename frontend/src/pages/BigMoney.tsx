@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import axios from 'axios';
-import { Activity, Database, RefreshCw, ShieldCheck, TrendingDown, TrendingUp } from 'lucide-react';
+import { Activity, Database, Info, RefreshCw, ShieldCheck, TrendingDown, TrendingUp } from 'lucide-react';
 import { createChart, ColorType, HistogramSeries, LineSeries, LineType, createSeriesMarkers } from 'lightweight-charts';
 
 const API = import.meta.env.VITE_API_URL || '';
@@ -74,6 +74,26 @@ interface BigMoneySignalRow {
 interface BigMoneySignalResp {
   data: BigMoneySignalRow[];
   latest: BigMoneySignalRow | null;
+  message?: string;
+}
+interface Bei50RiskRow {
+  date: string;
+  bei50_close: number | null;
+  hs300_close: number | null;
+  bei50_return_1d: number | null;
+  hs300_return_1d: number | null;
+  bei50_return_5d: number | null;
+  hs300_return_5d: number | null;
+  relative_return_5d: number | null;
+  volume_z_score: number | null;
+  drawdown_20d: number | null;
+  signal: string;
+  label: string;
+  summary: string;
+}
+interface Bei50RiskResp {
+  data: Bei50RiskRow[];
+  latest: Bei50RiskRow | null;
   message?: string;
 }
 
@@ -151,6 +171,40 @@ const refreshStatusStyle = (status: RefreshResp['status']): React.CSSProperties 
 
 const ETF_COLORS: Record<string, string> = {
   '510050': '#6366f1', '510300': '#f59e0b', '510500': '#06b6d4',
+};
+
+const ETF_GUIDE: Record<string, {
+  shortName: string;
+  index: string;
+  exposure: string;
+  role: string;
+  increaseAction: string;
+  decreaseAction: string;
+}> = {
+  '510050': {
+    shortName: '上证50ETF',
+    index: '上证50',
+    exposure: '超大盘蓝筹，金融、央国企和沪市权重更集中',
+    role: '观察权重股是否被托住；它强不代表全市场都强。',
+    increaseAction: '偏向稳住权重股，可提高上证50/红利蓝筹关注，谨慎看作大盘托底。',
+    decreaseAction: '权重托底减弱，若大盘同步走弱，降低追高和重仓蓝筹暴露。',
+  },
+  '510300': {
+    shortName: '沪深300ETF',
+    index: '沪深300',
+    exposure: 'A股核心大盘，跨沪深两市，最接近“大盘中枢”',
+    role: '本模块的主参考。510300 放量增份额通常比单只 ETF 更能说明托底大盘。',
+    increaseAction: '大盘核心托底信号增强，可优先考虑沪深300/宽基仓位的持有或低吸观察。',
+    decreaseAction: '核心宽基支撑变弱，若连续减少或异常度为负，偏向减仓/降低贝塔。',
+  },
+  '510500': {
+    shortName: '中证500ETF',
+    index: '中证500',
+    exposure: '中盘股和二线成长，弹性高于上证50/沪深300',
+    role: '观察托底是否从权重扩散到中盘。它单独增加更像风险偏好修复。',
+    increaseAction: '中盘修复概率提升，可观察中证500/成长板块，但需确认 510300 是否同步改善。',
+    decreaseAction: '中盘风险偏好下降，成长/中盘仓位要更谨慎，避免只看大盘权重掩盖分化。',
+  },
 };
 
 // ── Chart components ──────────────────────────────────────────────────────────
@@ -296,6 +350,52 @@ function SignalEvidenceChart({ data, range }: { data: BigMoneySignalRow[]; range
   return <div ref={containerRef} style={{ width: '100%' }} />;
 }
 
+function Bei50RiskChart({ data, range }: { data: Bei50RiskRow[]; range: Range }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const rows = filterByRange(data, range).filter(r => r.bei50_close !== null && r.hs300_close !== null);
+
+  useEffect(() => {
+    if (!containerRef.current || rows.length === 0) return;
+    const chart = createChart(containerRef.current, {
+      width: containerRef.current.clientWidth, height: 240,
+      layout: { background: { type: ColorType.Solid, color: 'transparent' }, textColor: '#9ca3af' },
+      grid: { vertLines: { color: 'rgba(255,255,255,0.05)' }, horzLines: { color: 'rgba(255,255,255,0.05)' } },
+      timeScale: { borderColor: 'rgba(255,255,255,0.1)' },
+      rightPriceScale: { borderColor: 'rgba(255,255,255,0.1)' },
+      crosshair: { mode: 1 },
+    });
+    const firstBei = rows[0].bei50_close || 1;
+    const firstHs = rows[0].hs300_close || 1;
+    const beiSeries = chart.addSeries(LineSeries, {
+      color: '#ec4899', lineWidth: 2, lineType: LineType.Curved,
+      priceFormat: { type: 'price', precision: 2, minMove: 0.01 }, title: '北证50累计涨跌(%)',
+    });
+    const hsSeries = chart.addSeries(LineSeries, {
+      color: '#6366f1', lineWidth: 2, lineType: LineType.Curved,
+      priceFormat: { type: 'price', precision: 2, minMove: 0.01 }, title: '沪深300累计涨跌(%)',
+    });
+    beiSeries.setData(rows.map(r => ({
+      time: r.date as any,
+      value: ((r.bei50_close || firstBei) / firstBei - 1) * 100,
+    })));
+    hsSeries.setData(rows.map(r => ({
+      time: r.date as any,
+      value: ((r.hs300_close || firstHs) / firstHs - 1) * 100,
+    })));
+    beiSeries.createPriceLine({ price: 0, color: 'rgba(255,255,255,0.16)', lineWidth: 1, lineStyle: 0, axisLabelVisible: false, title: '' });
+
+    chart.timeScale().fitContent();
+    const ro = new ResizeObserver(() => {
+      if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth });
+    });
+    ro.observe(containerRef.current);
+    return () => { chart.remove(); ro.disconnect(); };
+  }, [rows]);
+
+  if (rows.length === 0) return <EmptyChart text="暂无北证50风险偏好数据" />;
+  return <div ref={containerRef} style={{ width: '100%' }} />;
+}
+
 function IntradayChart({ data, date, sourceBroken, message }: {
   data: IntradayRow[]; date: string | null; sourceBroken?: boolean; message?: string;
 }) {
@@ -371,6 +471,143 @@ function EmptyChart({ text }: { text: string }) {
   );
 }
 
+function etfActionHint(delta: number | null | undefined, guide: typeof ETF_GUIDE[string]) {
+  if (delta === null || delta === undefined) return '暂无前后份额变化，先等待盘后快照补齐。';
+  if (delta > 0) return guide.increaseAction;
+  if (delta < 0) return guide.decreaseAction;
+  return '份额基本持平，暂不作为独立加减仓依据，结合篮子合计和异常度判断。';
+}
+
+function EtfGuidePanel({ latest }: { latest: BigMoneySignalRow | null }) {
+  const evidenceBySymbol = new Map((latest?.evidence?.core_etfs ?? []).map(item => [item.symbol, item]));
+  return (
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+      gap: 10,
+      marginBottom: 14,
+    }}>
+      {Object.entries(ETF_GUIDE).map(([symbol, guide]) => {
+        const evidence = evidenceBySymbol.get(symbol);
+        const color = ETF_COLORS[symbol] || 'var(--text-primary)';
+        return (
+          <div key={symbol} style={{
+            background: 'var(--bg-secondary)',
+            border: '1px solid var(--border-color)',
+            borderRadius: 10,
+            padding: '12px 14px',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+              <span style={{ width: 8, height: 8, borderRadius: 99, background: color, flexShrink: 0 }} />
+              <span style={{ fontSize: 13, fontWeight: 800, color }}>{symbol}</span>
+              <span style={{ fontSize: 12, color: 'var(--text-primary)', fontWeight: 700 }}>{guide.shortName}</span>
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.65 }}>
+              跟踪 {guide.index} · {guide.exposure}
+            </div>
+            <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.7 }}>
+              {guide.role}
+            </div>
+            <div style={{
+              marginTop: 9,
+              padding: '8px 9px',
+              borderRadius: 8,
+              background: 'rgba(255,255,255,0.035)',
+              color: evidence?.delta_share === undefined ? 'var(--text-muted)' : flowColor(evidence.delta_share),
+              fontSize: 11,
+              lineHeight: 1.65,
+            }}>
+              今日变化 {fmtYiFen(evidence?.delta_share ?? null)} · {etfActionHint(evidence?.delta_share, guide)}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function bei50SignalColor(signal?: string) {
+  if (signal === 'accumulate_watch' || signal === 'risk_on_watch') return '#ef4444';
+  if (signal === 'reduce_watch') return '#22c55e';
+  return '#9ca3af';
+}
+
+function bei50SignalBg(signal?: string) {
+  if (signal === 'accumulate_watch' || signal === 'risk_on_watch') return 'rgba(239,68,68,0.10)';
+  if (signal === 'reduce_watch') return 'rgba(34,197,94,0.10)';
+  return 'rgba(107,114,128,0.10)';
+}
+
+function Bei50RiskPanel({ risk, range, onRangeChange }: {
+  risk: Bei50RiskResp | null;
+  range: Range;
+  onRangeChange: (range: Range) => void;
+}) {
+  const latest = risk?.latest ?? null;
+  const color = bei50SignalColor(latest?.signal);
+  const actionText = latest?.signal === 'accumulate_watch'
+    ? '可提高小盘/成长观察权重，但只作为辅助，不覆盖托底主信号。'
+    : latest?.signal === 'reduce_watch'
+      ? '降低北交所和小盘题材暴露，等待相对强弱修复。'
+      : latest?.signal === 'risk_on_watch'
+        ? '风险偏好在扩散，等5日绝对涨幅或连续性确认后再升级。'
+        : '不单独调整仓位，继续观察北证50相对沪深300的变化。';
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
+        gap: 10,
+      }}>
+        <div style={{
+          background: bei50SignalBg(latest?.signal),
+          border: `1px solid ${color}44`,
+          borderRadius: 10,
+          padding: '13px 15px',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7, color, fontSize: 12, fontWeight: 800, marginBottom: 7 }}>
+            {latest?.signal === 'reduce_watch' ? <TrendingDown size={15} /> : <TrendingUp size={15} />}
+            北交所风险偏好
+          </div>
+          <div style={{ fontSize: 24, fontWeight: 850, color }}>{latest?.label ?? '暂无信号'}</div>
+          <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.7 }}>
+            {latest?.summary ?? '暂无北证50风险偏好数据。'} {actionText}
+          </div>
+        </div>
+        {([
+          ['北证50 1日', fmtPct(latest?.bei50_return_1d ?? null), latest?.bei50_return_1d ?? null],
+          ['北证50 5日', fmtPct(latest?.bei50_return_5d ?? null), latest?.bei50_return_5d ?? null],
+          ['相对沪深300', fmtPct(latest?.relative_return_5d ?? null), latest?.relative_return_5d ?? null],
+          ['成交量异常', fmtSigma(latest?.volume_z_score ?? null), latest?.volume_z_score ?? null],
+        ] as [string, string, number | null][]).map(([label, value, raw]) => (
+          <div key={label} style={{
+            background: 'var(--bg-secondary)',
+            border: '1px solid var(--border-color)',
+            borderRadius: 10,
+            padding: '12px 13px',
+          }}>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 5 }}>{label}</div>
+            <div style={{ fontSize: 18, fontWeight: 800, color: flowColor(raw) }}>{value}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 12, color: 'var(--text-secondary)' }}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><i style={{ width: 16, height: 3, background: '#ec4899', borderRadius: 2 }} />北证50</span>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><i style={{ width: 16, height: 3, background: '#6366f1', borderRadius: 2 }} />沪深300</span>
+          <span>20日回撤 {fmtPct(latest?.drawdown_20d ?? null)}</span>
+        </div>
+        <RangeButtons value={range} onChange={onRangeChange} />
+      </div>
+      <Bei50RiskChart data={risk?.data ?? []} range={range} />
+      {risk?.message && (
+        <div style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center' }}>{risk.message}</div>
+      )}
+    </div>
+  );
+}
+
 function SectionCard({ title, subtitle, children, action }: {
   title: string; subtitle?: string; children: React.ReactNode; action?: React.ReactNode;
 }) {
@@ -423,13 +660,25 @@ function TodayCards({ today }: { today: TodayResp | null }) {
         </div>
       )}
       {today.etf_shares.items.map(item => (
-        <div key={item.symbol} style={cardStyle}>
-          <div style={lbl}>{item.symbol} · 基金份额</div>
-          <div style={{ fontSize: 20, fontWeight: 700, color: ETF_COLORS[item.symbol] || 'var(--text-primary)' }}>
-            {item.total_share !== null ? `${item.total_share.toFixed(2)}亿份` : '—'}
-          </div>
-          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>{item.name} · {today.etf_shares.date ?? '—'}</div>
-        </div>
+        (() => {
+          const guide = ETF_GUIDE[item.symbol];
+          return (
+            <div key={item.symbol} style={cardStyle}>
+              <div style={lbl}>{item.symbol} · 基金份额</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: ETF_COLORS[item.symbol] || 'var(--text-primary)' }}>
+                {item.total_share !== null ? `${item.total_share.toFixed(2)}亿份` : '—'}
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                {item.name} · {today.etf_shares.date ?? '—'}
+              </div>
+              {guide && (
+                <div style={{ marginTop: 7, fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.55 }}>
+                  跟踪 {guide.index} · {guide.role}
+                </div>
+              )}
+            </div>
+          );
+        })()
       ))}
     </div>
   );
@@ -556,6 +805,7 @@ export default function BigMoney() {
   const [today, setToday] = useState<TodayResp | null>(null);
   const [intraday, setIntraday] = useState<IntradayResp | null>(null);
   const [signals, setSignals] = useState<BigMoneySignalResp | null>(null);
+  const [bei50Risk, setBei50Risk] = useState<Bei50RiskResp | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshResult, setRefreshResult] = useState<RefreshResp | null>(null);
@@ -564,6 +814,7 @@ export default function BigMoney() {
   const [nbRange, setNbRange] = useState<Range>('3Y');
   const [etfRange, setEtfRange] = useState<Range>('ALL');
   const [signalRange, setSignalRange] = useState<Range>('1Y');
+  const [bei50Range, setBei50Range] = useState<Range>('3M');
   const hasBackfilled = useRef(false);
   const intradayTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -576,16 +827,18 @@ export default function BigMoney() {
 
   const fetchAll = useCallback(async () => {
     try {
-      const [nbRes, etfRes, todayRes, signalRes] = await Promise.all([
+      const [nbRes, etfRes, todayRes, signalRes, bei50Res] = await Promise.all([
         axios.get(`${API}/api/v1/big-money/northbound`),
         axios.get(`${API}/api/v1/big-money/etf-shares`),
         axios.get(`${API}/api/v1/big-money/today`),
         axios.get(`${API}/api/v1/big-money/signals?days=3650`),
+        axios.get(`${API}/api/v1/big-money/bei50-risk?days=365`),
       ]);
       setNorthbound(nbRes.data);
       setEtf(etfRes.data);
       setToday(todayRes.data);
       setSignals(signalRes.data);
+      setBei50Risk(bei50Res.data);
 
       const hasNb = (nbRes.data.data?.length ?? 0) > 0;
       const hasEtf = (etfRes.data.symbols?.length ?? 0) > 0;
@@ -726,6 +979,13 @@ export default function BigMoney() {
           </SectionCard>
 
           <SectionCard
+            title="北交所风险偏好"
+            subtitle="北证50相对沪深300强弱 · 辅助判断小盘/成长是否扩散，不纳入国家队托底主信号"
+          >
+            <Bei50RiskPanel risk={bei50Risk} range={bei50Range} onRangeChange={setBei50Range} />
+          </SectionCard>
+
+          <SectionCard
             title="信号证据"
             subtitle="核心 ETF 篮子每日份额变化与 20 日滚动异常度"
             action={<RangeButtons value={signalRange} onChange={setSignalRange} />}
@@ -784,11 +1044,31 @@ export default function BigMoney() {
             subtitle="510050 / 510300 / 510500 基金份额（亿份）· 份额突增 = 推断汇金入场"
             action={<RangeButtons value={etfRange} onChange={setEtfRange} />}
           >
+            <div style={{
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: 10,
+              padding: '11px 13px',
+              borderRadius: 10,
+              background: 'rgba(245,158,11,0.08)',
+              color: 'var(--text-secondary)',
+              fontSize: 12,
+              lineHeight: 1.75,
+              marginBottom: 12,
+            }}>
+              <Info size={15} style={{ color: '#f59e0b', marginTop: 2, flexShrink: 0 }} />
+              <div>
+                <strong style={{ color: 'var(--text-primary)' }}>怎么读份额：</strong>
+                ETF 份额增加通常表示一级市场申购，可能对应大资金买入该宽基篮子；份额减少通常表示赎回，说明托底或配置力度下降。
+                单只 ETF 变化只看结构，三只合计变化和 20 日异常度才作为主信号依据。
+              </div>
+            </div>
+            <EtfGuidePanel latest={signals?.latest ?? null} />
             <div style={{ display: 'flex', gap: 16, marginBottom: 12, flexWrap: 'wrap' }}>
               {Object.entries(ETF_COLORS).map(([sym, color]) => (
                 <div key={sym} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
                   <div style={{ width: 16, height: 3, background: color, borderRadius: 2 }} />
-                  <span style={{ color: 'var(--text-secondary)' }}>{sym}</span>
+                  <span style={{ color: 'var(--text-secondary)' }}>{sym} · {ETF_GUIDE[sym]?.shortName ?? 'ETF'}</span>
                 </div>
               ))}
             </div>
@@ -804,7 +1084,7 @@ export default function BigMoney() {
             北向资金历史来自东方财富（有效至 2024-08-16）。
             <span style={{ color: '#f59e0b', margin: '0 4px' }}>▲ 数据断档</span>
             — 东方财富于 2024-08-19 更改接口字段结构，AkShare 尚未适配，历史净买额及分钟级实时数据均已不可用（约 21 个月缺口）。
-            ETF 份额来自上交所每日快照，每日盘后更新。托底信号是基于宽基 ETF 份额变化的代理判断，不代表真实持仓披露。
+            ETF 份额来自上交所每日快照，每日盘后更新。份额变化是基金总规模变化的代理，托底信号基于宽基 ETF 份额变化推断，不等于国家队实时持仓披露，也不构成单独买卖指令。
           </div>
         </>
       )}

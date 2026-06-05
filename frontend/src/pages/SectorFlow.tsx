@@ -38,6 +38,20 @@ interface ConceptSector {
   net_inflow_main_ratio: number | null;
 }
 
+type SignalHorizon = 'n1' | 'n2' | 'weekly';
+
+interface SignalHorizonData {
+  score: number;
+  direction: string;
+  label: string;
+  summary: string;
+  details: Record<string, number | string | null | undefined>;
+}
+
+type DisplaySignalData = Omit<SignalHorizonData, 'details'> & {
+  details?: SignalHorizonData['details'];
+};
+
 interface SignalData {
   sector_name: string;
   latest_date: string;
@@ -54,11 +68,60 @@ interface SignalData {
     consecutive_inflow_days: number;
     avg_5d_ratio: number;
   };
+  horizons?: Record<SignalHorizon, SignalHorizonData>;
+  signal_action?: {
+    action: 'accumulate' | 'hold' | 'reduce' | 'reduce_watch' | 'observe';
+    label: string;
+    strength: string;
+    reason: string;
+    horizon: SignalHorizon;
+    score: number;
+    flow_coverage_rate: number | null;
+  };
+  display_signal?: DisplaySignalData;
+}
+
+interface BacktestStat {
+  samples: number;
+  hit_rate: number | null;
+  excess_hit_rate?: number | null;
+  avg_return: number | null;
+  benchmark_avg_return?: number | null;
+  excess_avg_return?: number | null;
+  flow_coverage_samples?: number;
+  flow_coverage_rate?: number | null;
+}
+
+interface BacktestThreshold extends BacktestStat {
+  threshold: number;
+}
+
+interface SignalBacktest {
+  horizon: SignalHorizon;
+  label: string;
+  forward_days: number;
+  bullish: BacktestStat;
+  bearish: BacktestStat;
+  thresholds: BacktestThreshold[];
+  best_threshold: BacktestThreshold;
+  top_sectors: Array<{
+    sector_name: string;
+    samples: number;
+    hit_rate: number | null;
+    avg_return: number | null;
+  }>;
 }
 
 type ViewMode = 'amount' | 'ratio' | 'change';
 type DataSource = 'auto' | 'eastmoney' | 'ths';
 type HeatmapSortMode = 'default' | 'inflow' | 'signal';
+
+const HORIZON_TABS: { key: SignalHorizon; label: string; short: string }[] = [
+  { key: 'n1', label: 'N+1 明日', short: 'N+1' },
+  { key: 'n2', label: 'N+2 延续', short: 'N+2' },
+  { key: 'weekly', label: '周级趋势', short: '周级' },
+];
+const SIGNAL_STRONG_THRESHOLD = 65;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -73,6 +136,29 @@ const fmtPct = (v: number | null) => {
   return `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
 };
 
+const fmtRate = (v: number | null | undefined) => {
+  if (v === null || v === undefined) return '—';
+  return `${v.toFixed(1)}%`;
+};
+
+const getHorizonSignal = (s: SignalData, horizon: SignalHorizon): SignalHorizonData => {
+  const fallback: SignalHorizonData = {
+    score: s.score,
+    direction: s.direction,
+    label: s.label,
+    summary: s.win_rate_hint,
+    details: s.details,
+  };
+  return s.horizons?.[horizon] ?? fallback;
+};
+
+const getDisplaySignal = (s: SignalData, fallback: SignalHorizonData): DisplaySignalData =>
+  s.display_signal ?? fallback;
+
+const isRiskAction = (action?: string) => action === 'reduce' || action === 'reduce_watch';
+
+const riskActionRank = (action?: string) => action === 'reduce' ? 2 : action === 'reduce_watch' ? 1 : 0;
+
 const inflowColor = (v: number | null) =>
   v === null ? '#6b7280' : v > 0 ? '#ef4444' : '#22c55e';
 
@@ -82,8 +168,19 @@ const signalColor = (d: string) =>
 const signalBg = (d: string) =>
   d === 'bullish' ? 'rgba(239,68,68,0.1)' : d === 'bearish' ? 'rgba(34,197,94,0.1)' : 'rgba(107,114,128,0.1)';
 
+const actionColor = (action?: string) =>
+  action === 'accumulate' ? '#ef4444' : action === 'reduce' || action === 'reduce_watch' ? '#22c55e' : action === 'observe' ? '#f59e0b' : '#6b7280';
+
+const actionBg = (action?: string) =>
+  action === 'accumulate' ? 'rgba(239,68,68,0.1)' : action === 'reduce' || action === 'reduce_watch' ? 'rgba(34,197,94,0.1)' : action === 'observe' ? 'rgba(245,158,11,0.12)' : 'rgba(107,114,128,0.1)';
+
 const SignalIcon = ({ direction }: { direction: string }) =>
   direction === 'bullish' ? <TrendingUp size={14} /> : direction === 'bearish' ? <TrendingDown size={14} /> : <Minus size={14} />;
+
+const FinalSignalIcon = ({ signal, action }: { signal: DisplaySignalData; action?: string }) =>
+  action === 'accumulate' || signal.direction === 'bullish' ? <TrendingUp size={14} />
+    : action === 'reduce' || action === 'reduce_watch' || signal.direction === 'bearish' ? <TrendingDown size={14} />
+      : <Minus size={14} />;
 
 // ── Heatmap cell ─────────────────────────────────────────────────────────────
 
@@ -124,6 +221,34 @@ function HeatCell({
       )}
       <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '4px' }}>{name}</div>
       <div style={{ fontSize: '13px', fontWeight: 700, color: inflowColor(value) }}>{fmtYi(value)}</div>
+    </div>
+  );
+}
+
+function SignalRankRow({ signal, horizon }: { signal: SignalData; horizon: SignalHorizon }) {
+  const hs = getHorizonSignal(signal, horizon);
+  const display = getDisplaySignal(signal, hs);
+  const displayAction = signal.signal_action?.action;
+  const displayColor = displayAction ? actionColor(displayAction) : signalColor(display.direction);
+  const displayBg = displayAction ? actionBg(displayAction) : signalBg(display.direction);
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+      <span style={{
+        display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px',
+        padding: '2px 8px', borderRadius: '12px',
+        background: displayBg, color: displayColor, fontWeight: 600,
+      }} title={display.summary}>
+        <FinalSignalIcon signal={display} action={displayAction} /> {display.label}
+      </span>
+      <span style={{ flex: 1, fontSize: '13px', color: 'var(--text-primary)' }}>{signal.sector_name}</span>
+      <span title={hs.summary} style={{
+        fontSize: '11px', fontWeight: 700, padding: '2px 7px', borderRadius: '10px',
+        color: signalColor(hs.direction), background: signalBg(hs.direction),
+      }}>
+        {HORIZON_TABS.find(h => h.key === horizon)?.short}
+      </span>
+      <span style={{ fontSize: '12px', fontWeight: 700, color: signalColor(hs.direction) }}>{hs.score}</span>
     </div>
   );
 }
@@ -227,6 +352,8 @@ export default function SectorFlow() {
   const [industryData, setIndustryData] = useState<IndustryData | null>(null);
   const [conceptData, setConceptData] = useState<ConceptSector[]>([]);
   const [signals, setSignals] = useState<SignalData[]>([]);
+  const [signalBacktests, setSignalBacktests] = useState<Partial<Record<SignalHorizon, SignalBacktest>>>({});
+  const [signalHorizon, setSignalHorizon] = useState<SignalHorizon>('n1');
   const [days, setDays] = useState(20);
   const [selectedSectors, setSelectedSectors] = useState<string[]>([]);
   const [viewMode, setViewMode] = useState<ViewMode>('change');
@@ -254,6 +381,7 @@ export default function SectorFlow() {
       setIndustryData(indRes.data);
       setConceptData(conRes.data.sectors || []);
       setSignals(sigRes.data.signals || []);
+      setSignalBacktests(sigRes.data.backtests || {});
       setLastUpdated(new Date().toLocaleTimeString('zh-CN'));
 
       // Auto-backfill on first load when historical data is sparse
@@ -296,7 +424,7 @@ export default function SectorFlow() {
   const handleBackfill = async () => {
     setBackfilling(true);
     try {
-      await axios.post(`${API_BASE_URL}/api/v1/sector-flow/backfill?days=30`, null, { timeout: 8000 });
+      await axios.post(`${API_BASE_URL}/api/v1/sector-flow/backfill?days=365`, null, { timeout: 8000 });
     } catch {
       // ignore
     } finally {
@@ -337,7 +465,7 @@ export default function SectorFlow() {
       latestInflow[name] = sorted[0]?.net_inflow_main ?? null;
     }
   }
-  const signalScore = new Map(signals.map(s => [s.sector_name, s.score]));
+  const signalScore = new Map(signals.map(s => [s.sector_name, getHorizonSignal(s, signalHorizon).score]));
   const sortedHeatmapSectors = [...allSectors].sort((a, b) => {
     if (heatmapSort === 'signal') {
       return (signalScore.get(b) ?? -Infinity) - (signalScore.get(a) ?? -Infinity);
@@ -349,8 +477,27 @@ export default function SectorFlow() {
   });
 
   const hasData = industryData && allSectors.length > 0;
-  const topSignals = signals.slice(0, 5);
-  const bottomSignals = [...signals].reverse().slice(0, 5);
+  const rankedSignals = [...signals].sort((a, b) => getHorizonSignal(b, signalHorizon).score - getHorizonSignal(a, signalHorizon).score);
+  const horizonStrongSignals = rankedSignals.filter(s => getHorizonSignal(s, signalHorizon).score >= SIGNAL_STRONG_THRESHOLD);
+  const blockedStrongSignals = horizonStrongSignals.filter(s => isRiskAction(s.signal_action?.action));
+  const topSignals = horizonStrongSignals
+    .filter(s => !isRiskAction(s.signal_action?.action))
+    .slice(0, 5);
+  const riskSignals = [...signals]
+    .filter(s => isRiskAction(s.signal_action?.action))
+    .sort((a, b) => {
+      const actionRank = riskActionRank(b.signal_action?.action) - riskActionRank(a.signal_action?.action);
+      if (actionRank !== 0) return actionRank;
+      return (a.signal_action?.score ?? getHorizonSignal(a, signalHorizon).score) - (b.signal_action?.score ?? getHorizonSignal(b, signalHorizon).score);
+    })
+    .slice(0, 5);
+  const bottomSignals = [...rankedSignals].reverse().slice(0, 5);
+  const activeBacktest = signalBacktests[signalHorizon];
+  const activeHorizonLabel = HORIZON_TABS.find(h => h.key === signalHorizon)?.label ?? signalHorizon;
+  const activeHorizonShort = HORIZON_TABS.find(h => h.key === signalHorizon)?.short ?? signalHorizon;
+  const topEmptyText = horizonStrongSignals.length === 0
+    ? `${activeHorizonLabel}暂无 ${SIGNAL_STRONG_THRESHOLD}+ 强信号`
+    : `${blockedStrongSignals.length} 个${activeHorizonShort}强信号被减仓/风控拦截，暂无通过风控的看多候选`;
   const isAllSelected = allSectors.length > 0 && selectedSectors.length === allSectors.length;
   const showLegendCount = selectedSectors.length > 8;
 
@@ -448,7 +595,7 @@ export default function SectorFlow() {
               ['主力净流入', '机构大资金（超大单+大单）的净买入额。持续流入 = 机构在建仓'],
               ['占比(%)视图', '净流入额占当日总成交额比例，全选时用此视图更易对比'],
               ['多板块对比', '点击热力格加入对比，「全选」自动切占比视图，线条平滑处理'],
-              ['明日信号分', '资金流(40%) + 价格动量(40%) + 全局VIX风险(20%)合成。仅作参考'],
+              ['多周期信号', 'N+1/N+2/周级分别按资金、价格、风险合成，并用历史未来收益做回测验证'],
             ].map(([title, desc]) => (
               <div key={title} style={{
                 padding: '10px 14px', borderRadius: '10px',
@@ -510,36 +657,105 @@ export default function SectorFlow() {
 
             {/* Signal rankings */}
             <div style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-color)', borderRadius: '16px', padding: '20px' }}>
-              <h3 style={{ fontSize: '14px', fontWeight: 700, color: 'var(--text-primary)', margin: '0 0 16px' }}>
-                明日信号 · 行业综合评分
-              </h3>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', marginBottom: '14px' }}>
+                <h3 style={{ fontSize: '14px', fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>
+                  多周期信号 · 行业综合评分
+                </h3>
+                <div style={{ display: 'flex', borderRadius: '8px', overflow: 'hidden', border: '1px solid var(--border-color)', flexShrink: 0 }}>
+                  {HORIZON_TABS.map(({ key, short, label }) => (
+                    <button key={key} onClick={() => setSignalHorizon(key)} title={label} style={{
+                      padding: '4px 9px', fontSize: '12px', fontWeight: 700, border: 'none', cursor: 'pointer',
+                      background: signalHorizon === key ? '#6366f1' : 'var(--bg-secondary)',
+                      color: signalHorizon === key ? 'white' : 'var(--text-secondary)',
+                      borderRight: key !== 'weekly' ? '1px solid var(--border-color)' : 'none',
+                    }}>
+                      {short}
+                    </button>
+                  ))}
+                </div>
+              </div>
               {signals.length === 0 ? (
                 <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>暂无信号数据</p>
               ) : (
                 <>
-                  <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '8px', fontWeight: 600 }}>看多信号最强 TOP5</div>
-                  {topSignals.map(s => (
-                    <div key={s.sector_name} style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
-                      <span style={{
-                        display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px',
-                        padding: '2px 8px', borderRadius: '12px',
-                        background: signalBg(s.direction), color: signalColor(s.direction), fontWeight: 600,
-                      }}><SignalIcon direction={s.direction} /> {s.label}</span>
-                      <span style={{ flex: 1, fontSize: '13px', color: 'var(--text-primary)' }}>{s.sector_name}</span>
-                      <span style={{ fontSize: '12px', fontWeight: 700, color: signalColor(s.direction) }}>{s.score}</span>
+                  <div style={{
+                    display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: '8px',
+                    marginBottom: '12px',
+                  }}>
+                    {([
+                      ['看多样本', activeBacktest?.bullish.samples ?? 0],
+                      ['超额命中', fmtRate(activeBacktest?.bullish.excess_hit_rate ?? activeBacktest?.bullish.hit_rate)],
+                      ['超额收益', fmtPct(activeBacktest?.bullish.excess_avg_return ?? null)],
+                      ['最佳阈值', activeBacktest?.best_threshold?.samples ? `${activeBacktest.best_threshold.threshold}+` : '—'],
+                    ] as [string, string | number][]).map(([label, value]) => (
+                      <div key={label} style={{
+                        padding: '8px 9px', borderRadius: '8px',
+                        background: 'rgba(99,102,241,0.06)', border: '1px solid rgba(99,102,241,0.14)',
+                      }}>
+                        <div style={{ fontSize: '10px', color: 'var(--text-muted)', fontWeight: 700, marginBottom: '3px' }}>{label}</div>
+                        <div style={{ fontSize: '13px', color: 'var(--text-primary)', fontWeight: 800 }}>{value}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{
+                    display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '8px',
+                    margin: '-4px 0 12px',
+                  }}>
+                    {([
+                      ['绝对', fmtPct(activeBacktest?.bullish.avg_return ?? null)],
+                      ['基准', fmtPct(activeBacktest?.bullish.benchmark_avg_return ?? null)],
+                      ['资金覆盖', `${activeBacktest?.bullish.flow_coverage_samples ?? 0}/${activeBacktest?.bullish.samples ?? 0} · ${fmtRate(activeBacktest?.bullish.flow_coverage_rate)}`],
+                    ] as [string, string][]).map(([label, value]) => (
+                      <div key={label} style={{
+                        padding: '6px 8px', borderRadius: '8px',
+                        background: 'var(--bg-secondary)', color: 'var(--text-muted)', fontSize: '11px',
+                      }}>
+                        <span style={{ fontWeight: 700, marginRight: '4px' }}>{label}</span>{value}
+                      </div>
+                    ))}
+                  </div>
+                  {activeBacktest?.thresholds?.length ? (
+                    <div style={{ display: 'flex', alignItems: 'flex-end', gap: '6px', height: '42px', marginBottom: '12px' }}>
+                      {activeBacktest.thresholds.map(t => {
+                        const h = Math.max(6, Math.min(36, (t.excess_hit_rate ?? t.hit_rate ?? 0) * 0.36));
+                        return (
+                          <div key={t.threshold} title={`${t.threshold}+ 样本${t.samples} 超额命中${fmtRate(t.excess_hit_rate ?? t.hit_rate)} 超额${fmtPct(t.excess_avg_return ?? null)} 绝对${fmtPct(t.avg_return)}`} style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{
+                              height: `${h}px`, borderRadius: '5px 5px 2px 2px',
+                              background: t.samples ? 'linear-gradient(180deg, #ef4444, rgba(239,68,68,0.28))' : 'rgba(107,114,128,0.18)',
+                            }} />
+                            <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '3px', textAlign: 'center' }}>{t.threshold}+</div>
+                          </div>
+                        );
+                      })}
                     </div>
+                  ) : null}
+                  <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '8px', fontWeight: 700 }}>
+                    看多候选 TOP5 · 强信号且未触发风控 · {activeHorizonLabel}
+                  </div>
+                  {topSignals.length === 0 ? (
+                    <div style={{
+                      fontSize: '12px', color: 'var(--text-muted)', marginBottom: '6px',
+                      padding: '7px 9px', borderRadius: '8px', background: 'var(--bg-secondary)',
+                    }}>
+                      {topEmptyText}
+                    </div>
+                  ) : topSignals.map(s => (
+                    <SignalRankRow key={s.sector_name} signal={s} horizon={signalHorizon} />
                   ))}
-                  <div style={{ fontSize: '11px', color: 'var(--text-muted)', margin: '12px 0 8px', fontWeight: 600 }}>看空信号最强 TOP5</div>
+                  <div style={{ fontSize: '11px', color: 'var(--text-muted)', margin: '12px 0 8px', fontWeight: 700 }}>
+                    减仓/风控观察 TOP5 · 最终动作优先
+                  </div>
+                  {riskSignals.length === 0 ? (
+                    <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '6px' }}>暂无减仓风控触发</div>
+                  ) : riskSignals.map(s => (
+                    <SignalRankRow key={s.sector_name} signal={s} horizon={signalHorizon} />
+                  ))}
+                  <div style={{ fontSize: '11px', color: 'var(--text-muted)', margin: '12px 0 8px', fontWeight: 700 }}>
+                    低分/看空 TOP5 · 看空样本 {activeBacktest?.bearish.samples ?? 0} · 命中 {fmtRate(activeBacktest?.bearish.hit_rate)}
+                  </div>
                   {bottomSignals.map(s => (
-                    <div key={s.sector_name} style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
-                      <span style={{
-                        display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px',
-                        padding: '2px 8px', borderRadius: '12px',
-                        background: signalBg(s.direction), color: signalColor(s.direction), fontWeight: 600,
-                      }}><SignalIcon direction={s.direction} /> {s.label}</span>
-                      <span style={{ flex: 1, fontSize: '13px', color: 'var(--text-primary)' }}>{s.sector_name}</span>
-                      <span style={{ fontSize: '12px', fontWeight: 700, color: signalColor(s.direction) }}>{s.score}</span>
-                    </div>
+                    <SignalRankRow key={s.sector_name} signal={s} horizon={signalHorizon} />
                   ))}
                 </>
               )}
@@ -595,7 +811,7 @@ export default function SectorFlow() {
               </div>
             </div>
             <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: '0 0 16px' }}>
-              点击板块切换选中 · 当前排序：{heatmapSort === 'signal' ? '看多信号分由高到低' : heatmapSort === 'inflow' ? '主力净流入由高到低' : '行业名称'} · 红色=流入 绿色=流出（A股配色）
+              点击板块切换选中 · 当前排序：{heatmapSort === 'signal' ? `${HORIZON_TABS.find(h => h.key === signalHorizon)?.label}看多分由高到低` : heatmapSort === 'inflow' ? '主力净流入由高到低' : '行业名称'} · 红色=流入 绿色=流出（A股配色）
             </p>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
               {sortedHeatmapSectors.map(name => (
@@ -635,7 +851,7 @@ export default function SectorFlow() {
                     color: backfilling ? 'var(--text-muted)' : 'var(--text-secondary)',
                     cursor: backfilling ? 'not-allowed' : 'pointer',
                   }}>
-                    {backfilling ? '回填中…约35秒' : '回填历史'}
+                    {backfilling ? '回填中…约1-3分钟' : '回填一年价格'}
                   </button>
                   {/* View mode toggle */}
                   <div style={{ display: 'flex', borderRadius: '8px', overflow: 'hidden', border: '1px solid var(--border-color)' }}>
@@ -699,17 +915,36 @@ export default function SectorFlow() {
                         flex: '1 1 160px', padding: '12px 14px', borderRadius: '12px',
                         background: 'var(--bg-secondary)', borderLeft: `3px solid ${getColor(idx)}`,
                       }}>
-                        <div style={{ fontSize: '12px', fontWeight: 700, color: getColor(idx), marginBottom: '6px' }}>{name}</div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>
-                          <span style={{
-                            display: 'flex', alignItems: 'center', gap: '3px', fontSize: '12px',
-                            padding: '2px 7px', borderRadius: '10px',
-                            background: signalBg(sig.direction), color: signalColor(sig.direction), fontWeight: 600,
-                          }}><SignalIcon direction={sig.direction} /> {sig.label}</span>
-                          <span style={{ fontSize: '13px', fontWeight: 700, color: signalColor(sig.direction) }}>{sig.score}/100</span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px' }}>
+                          <div style={{ flex: 1, fontSize: '12px', fontWeight: 700, color: getColor(idx) }}>{name}</div>
+                          <span title={sig.signal_action?.reason} style={{
+                            fontSize: '11px', fontWeight: 800, padding: '2px 7px', borderRadius: '10px',
+                            color: actionColor(sig.signal_action?.action), background: actionBg(sig.signal_action?.action),
+                          }}>{sig.signal_action?.label ?? '观察'}</span>
                         </div>
-                        <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>连续流入 {sig.details.consecutive_inflow_days} 天</div>
-                        <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>5日均占比 {sig.details.avg_5d_ratio}%</div>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '6px', marginBottom: '8px' }}>
+                          {HORIZON_TABS.map(({ key, short }) => {
+                            const hs = getHorizonSignal(sig, key);
+                            return (
+                              <div key={key} title={hs.summary} style={{
+                                padding: '6px 7px', borderRadius: '8px',
+                                background: signalBg(hs.direction),
+                                border: `1px solid ${signalColor(hs.direction)}22`,
+                              }}>
+                                <div style={{ fontSize: '10px', color: 'var(--text-muted)', fontWeight: 700, marginBottom: '2px' }}>{short}</div>
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '3px' }}>
+                                  <span style={{ color: signalColor(hs.direction), display: 'flex', alignItems: 'center' }}>
+                                    <SignalIcon direction={hs.direction} />
+                                  </span>
+                                  <span style={{ fontSize: '12px', fontWeight: 800, color: signalColor(hs.direction) }}>{hs.score}</span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>连续流入 {sig.details.consecutive_inflow_days ?? 0} 天</div>
+                        <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>5日均占比 {sig.details.avg_5d_ratio ?? 0}%</div>
+                        <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>资金覆盖 {fmtRate(sig.signal_action?.flow_coverage_rate)}</div>
                       </div>
                     );
                   })}
