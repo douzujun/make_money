@@ -5,6 +5,7 @@ import {
 import { RefreshCw, Play, Info, ChevronDown, ChevronUp } from 'lucide-react';
 
 const API = '/api/v1';
+const PORTFOLIO_BACKTEST_A_KEY = 'portfolio-center-backtest-a-v1';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -49,6 +50,13 @@ interface BacktestResponse {
 
 interface PriceStatus {
   [symbol: string]: { name: string; cached_rows: number };
+}
+
+interface PortfolioSnapshotForBacktest {
+  snapshot_date: string;
+  money_fund_amount: number;
+  cash_amount: number;
+  holdings: { amount: number; bucket: string }[];
 }
 
 // ── Palette ────────────────────────────────────────────────────────────────
@@ -438,6 +446,52 @@ function NavChart({
 const EMPTY_WEIGHTS = (): Record<string, number> =>
   ({ '510300': 0, '510050': 0, '510500': 0, '159915': 0, '513100': 0, '511010': 0, '518880': 0, CASH: 0 });
 
+const normaliseWeights = (weights: Record<string, number>) => {
+  const total = Object.values(weights).reduce((s, v) => s + v, 0);
+  if (!total) return weights;
+  return Object.fromEntries(
+    Object.entries(weights).map(([key, value]) => [key, Math.round((value / total) * 10000) / 10000]),
+  );
+};
+
+const portfolioSnapshotToBacktestWeights = (snapshot: PortfolioSnapshotForBacktest) => {
+  const bucketAmounts: Record<string, number> = {
+    a_share_core: 0,
+    overseas_core: 0,
+    gold: 0,
+    cash: snapshot.money_fund_amount + snapshot.cash_amount,
+    commodities: 0,
+    themes: 0,
+    fragments: 0,
+  };
+  snapshot.holdings.forEach(holding => {
+    bucketAmounts[holding.bucket] = (bucketAmounts[holding.bucket] ?? 0) + holding.amount;
+  });
+  const total = Object.values(bucketAmounts).reduce((sum, amount) => sum + amount, 0) || 1;
+  return normaliseWeights({
+    '510300': (bucketAmounts.a_share_core / total) * 0.7,
+    '510050': 0,
+    '510500': (bucketAmounts.a_share_core / total) * 0.3 + (bucketAmounts.commodities / total) * 0.6,
+    '159915': bucketAmounts.themes / total,
+    '513100': bucketAmounts.overseas_core / total,
+    '511010': 0,
+    '518880': bucketAmounts.gold / total + (bucketAmounts.commodities / total) * 0.4,
+    CASH: (bucketAmounts.cash + bucketAmounts.fragments) / total,
+  });
+};
+
+const loadStoredPortfolioA = (): { weights: Record<string, number>; snapshot_date?: string } | null => {
+  try {
+    const raw = localStorage.getItem(PORTFOLIO_BACKTEST_A_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed?.weights) return null;
+    return { weights: { ...EMPTY_WEIGHTS(), ...parsed.weights }, snapshot_date: parsed.snapshot_date };
+  } catch {
+    return null;
+  }
+};
+
 const defaultConfig = (presets: Preset[], id: string): PConfig => {
   const p = presets.find(x => x.id === id);
   return p
@@ -457,6 +511,7 @@ export default function Backtest() {
   const [configA, setConfigA] = useState<PConfig>({ preset: null, weights: EMPTY_WEIGHTS(), customMode: false });
   const [configB, setConfigB] = useState<PConfig>({ preset: null, weights: EMPTY_WEIGHTS(), customMode: false });
   const [enableB, setEnableB] = useState(false);
+  const [portfolioALabel, setPortfolioALabel] = useState('');
   const [rebalance, setRebalance] = useState<'1M' | '1Q'>('1Q');
   const [startDate, setStartDate] = useState('2013-01-01');
 
@@ -468,6 +523,7 @@ export default function Backtest() {
   const loadMeta = useCallback(async () => {
     const token = localStorage.getItem('token');
     const h = { Authorization: `Bearer ${token}` };
+    const useCurrentPortfolio = new URLSearchParams(window.location.search).get('portfolioA') === 'current';
     const [a, p, s] = await Promise.all([
       fetch(`${API}/backtest/assets`, { headers: h }).then(r => r.json()),
       fetch(`${API}/backtest/presets`, { headers: h }).then(r => r.json()),
@@ -477,8 +533,37 @@ export default function Backtest() {
     setPresets(p.presets ?? []);
     setPriceStatus(s);
     if (p.presets?.length) {
-      setConfigA(defaultConfig(p.presets, 'balanced'));
-      setConfigB(defaultConfig(p.presets, 'all_weather'));
+      let nextA = defaultConfig(p.presets, 'balanced');
+      let nextB = defaultConfig(p.presets, 'all_weather');
+      let nextEnableB = false;
+      let nextLabel = '';
+
+      if (useCurrentPortfolio) {
+        const stored = loadStoredPortfolioA();
+        if (stored) {
+          nextA = { preset: null, weights: stored.weights, customMode: true };
+          nextB = defaultConfig(p.presets, 'user_target');
+          nextEnableB = true;
+          nextLabel = `组合A已使用当前持仓代理${stored.snapshot_date ? `（${stored.snapshot_date}）` : ''}，组合B默认使用「你的目标框架」。`;
+        } else {
+          try {
+            const latest = await fetch(`${API}/portfolio/latest`, { headers: h }).then(r => r.json());
+            if (latest?.snapshot) {
+              nextA = { preset: null, weights: { ...EMPTY_WEIGHTS(), ...portfolioSnapshotToBacktestWeights(latest.snapshot) }, customMode: true };
+              nextB = defaultConfig(p.presets, 'user_target');
+              nextEnableB = true;
+              nextLabel = `组合A已使用后端最新持仓代理（${latest.snapshot.snapshot_date}），组合B默认使用「你的目标框架」。`;
+            }
+          } catch {
+            nextLabel = '未能读取当前持仓，组合A暂用默认预设。';
+          }
+        }
+      }
+
+      setConfigA(nextA);
+      setConfigB(nextB);
+      setEnableB(nextEnableB);
+      setPortfolioALabel(nextLabel);
     }
   }, []);
 
@@ -509,7 +594,7 @@ export default function Backtest() {
     try {
       const token = localStorage.getItem('token');
       const body = {
-        portfolio_a: { weights: configA.weights, label: '组合A' },
+        portfolio_a: { weights: configA.weights, label: portfolioALabel ? '当前持仓代理' : '组合A' },
         portfolio_b: enableB ? { weights: configB.weights, label: '组合B' } : null,
         rebalance,
         start_date: startDate,
@@ -533,6 +618,7 @@ export default function Backtest() {
     Math.abs(Object.values(w).reduce((s, v) => s + v, 0) - 1) < 0.005;
 
   const canRun = hasData && weightsValid(configA.weights) && (!enableB || weightsValid(configB.weights));
+  const labelA = portfolioALabel ? '当前持仓代理' : '组合A';
 
   return (
     <div style={{ color: 'var(--text-primary)' }}>
@@ -544,6 +630,21 @@ export default function Backtest() {
           中国资产 · 定期再平衡 · 历史净值对比
         </p>
       </div>
+
+      {portfolioALabel && (
+        <div style={{
+          background: '#6366f114',
+          border: '1px solid #6366f144',
+          borderRadius: 12,
+          padding: '10px 14px',
+          marginBottom: 16,
+          fontSize: 13,
+          color: '#4f46e5',
+          lineHeight: 1.6,
+        }}>
+          {portfolioALabel} 真实场外基金会按资产桶映射为 ETF/现金代理，方便方向性对比。
+        </div>
+      )}
 
       {/* ── Data status ── */}
       <div style={{
@@ -695,7 +796,7 @@ export default function Backtest() {
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, flexWrap: 'wrap', gap: 8 }}>
               <span style={{ fontSize: 14, fontWeight: 700 }}>累计净值曲线</span>
               <div style={{ display: 'flex', alignItems: 'center', gap: 16, fontSize: 12, color: 'var(--text-muted)', flexWrap: 'wrap' }}>
-                <span><span style={{ color: COLOR_A }}>——</span> 组合A</span>
+                <span><span style={{ color: COLOR_A }}>——</span> {labelA}</span>
                 {result.portfolio_b && <span><span style={{ color: COLOR_B }}>- - -</span> 组合B</span>}
                 <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                   <span style={{
@@ -718,7 +819,7 @@ export default function Backtest() {
               resultA={result.portfolio_a}
               resultB={result.portfolio_b}
               bearPeriods={result.bear_periods}
-              labelA="组合A"
+              labelA={labelA}
               labelB="组合B"
               hasB={!!result.portfolio_b}
             />
@@ -734,7 +835,7 @@ export default function Backtest() {
           {/* Weight breakdown */}
           <div style={{ display: 'flex', gap: 16, marginTop: 16, flexWrap: 'wrap' }}>
             {[
-              { label: '组合A', color: COLOR_A, weights: configA.weights },
+              { label: labelA, color: COLOR_A, weights: configA.weights },
               ...(result.portfolio_b ? [{ label: '组合B', color: COLOR_B, weights: configB.weights }] : []),
             ].map(({ label, color, weights }) => (
               <div key={label} style={{

@@ -10,6 +10,7 @@ const API = '/api/v1';
 const PORTFOLIO_DRAFT_KEY = 'portfolio-center-draft-v1';
 const PORTFOLIO_CODE_BOOK_KEY = 'portfolio-center-fund-code-book-v1';
 const PORTFOLIO_PROFIT_BOOK_KEY = 'portfolio-center-profit-book-v1';
+const PORTFOLIO_BACKTEST_A_KEY = 'portfolio-center-backtest-a-v1';
 
 type BucketId =
   | 'a_share_core'
@@ -323,6 +324,50 @@ function applyLocalBooks(snapshot: Snapshot): Snapshot {
   return applyProfitBook(applyCodeBook(snapshot));
 }
 
+function normaliseWeights(weights: Record<string, number>) {
+  const total = Object.values(weights).reduce((sum, value) => sum + value, 0);
+  if (!total) return weights;
+  return Object.fromEntries(
+    Object.entries(weights).map(([key, value]) => [key, Math.round((value / total) * 10000) / 10000]),
+  );
+}
+
+function buildBacktestProxy(snapshot: Snapshot) {
+  const bucketAmounts: Record<BucketId, number> = {
+    a_share_core: 0,
+    overseas_core: 0,
+    gold: 0,
+    cash: snapshot.money_fund_amount + snapshot.cash_amount,
+    commodities: 0,
+    themes: 0,
+    fragments: 0,
+  };
+  snapshot.holdings.forEach(holding => {
+    bucketAmounts[holding.bucket] += holding.amount;
+  });
+  const total = Object.values(bucketAmounts).reduce((sum, amount) => sum + amount, 0) || 1;
+  const weights = {
+    '510300': (bucketAmounts.a_share_core / total) * 0.7,
+    '510050': 0,
+    '510500': (bucketAmounts.a_share_core / total) * 0.3 + (bucketAmounts.commodities / total) * 0.6,
+    '159915': bucketAmounts.themes / total,
+    '513100': bucketAmounts.overseas_core / total,
+    '511010': 0,
+    '518880': bucketAmounts.gold / total + (bucketAmounts.commodities / total) * 0.4,
+    CASH: (bucketAmounts.cash + bucketAmounts.fragments) / total,
+  };
+  return {
+    weights: normaliseWeights(weights),
+    snapshot_date: snapshot.snapshot_date,
+    generated_at: new Date().toISOString(),
+    source: 'portfolio_center_snapshot',
+  };
+}
+
+function saveBacktestProxy(snapshot: Snapshot) {
+  localStorage.setItem(PORTFOLIO_BACKTEST_A_KEY, JSON.stringify(buildBacktestProxy(snapshot)));
+}
+
 function Card({
   children,
   style,
@@ -587,98 +632,177 @@ function MarketConfirmationPanel({ confirmations }: { confirmations: Recommendat
   );
 }
 
-function FundRecommendationTable({ items }: { items: FundRecommendation[] }) {
-  const shown = items.slice(0, 18);
+type FundRecommendationFilter = 'actionable' | 'all' | 'add' | 'trim' | 'estimate_available';
+
+function SelectControl({
+  label,
+  value,
+  onChange,
+  options,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  options: { value: string; label: string }[];
+}) {
   return (
-    <div style={{ overflowX: 'auto' }}>
-      <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 1160 }}>
-        <thead>
-          <tr>
-            {['基金', '估值', '持有收益', '资金流', '建议', '金额', '归因', '数据'].map(label => (
-              <th key={label} style={{ textAlign: 'left', padding: '10px 8px', fontSize: 12, color: 'var(--text-muted)', borderBottom: '1px solid var(--border-color)' }}>
-                {label}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {shown.map(item => {
-            const estimate = item.estimate;
-            const estPct = estimate.estimate_change_pct;
-            const estColor = estPct === undefined || estPct === null
-              ? 'var(--text-muted)'
-              : estPct >= 0
-                ? '#dc2626'
-                : '#16a34a';
-            return (
-              <tr key={`${item.name}-${item.fund_code ?? 'none'}`}>
-                <td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-color)', minWidth: 260 }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>{item.name}</div>
-                  <div style={{ fontSize: 11, color: BUCKETS[item.bucket].color, marginTop: 2 }}>
-                    {item.fund_code || '未填代码'} · {BUCKETS[item.bucket].name}
-                  </div>
-                </td>
-                <td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-color)' }}>
-                  {estimate.available ? (
-                    <div>
-                      <div style={{ fontSize: 14, fontWeight: 800, color: estColor }}>
-                        {estPct !== undefined && estPct !== null ? `${estPct >= 0 ? '+' : ''}${estPct.toFixed(2)}%` : '—'}
-                      </div>
-                      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{estimate.estimate_time || estimate.nav_date}</div>
-                    </div>
-                  ) : (
-                    <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{estimate.message}</div>
-                  )}
-                </td>
-                <td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-color)' }}>
-                  <div style={{ fontSize: 13, fontWeight: 800, color: (item.profit_amount ?? 0) >= 0 ? '#dc2626' : '#16a34a' }}>
-                    {item.profit_amount === null || item.profit_amount === undefined
-                      ? '—'
-                      : `${item.profit_amount >= 0 ? '+' : ''}${money(item.profit_amount)}`}
-                  </div>
-                  <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                    {item.profit_rate === null || item.profit_rate === undefined
-                      ? '收益率未录入'
-                      : `${item.profit_rate >= 0 ? '+' : ''}${item.profit_rate.toFixed(2)}%`}
-                  </div>
-                </td>
-                <td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-color)', minWidth: 170 }}>
-                  <MarketBadge confirmation={item.market_confirmation} />
-                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 5, lineHeight: 1.45 }}>
-                    {item.market_confirmation?.sector_name || item.market_confirmation?.date || '—'}
-                    {item.market_confirmation?.evidence?.score !== undefined && ` · ${item.market_confirmation.evidence.score}分`}
-                  </div>
-                </td>
-                <td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-color)' }}>
-                  <span style={{ display: 'inline-flex', padding: '4px 9px', borderRadius: 999, background: `${actionColor(item.recommendation)}18`, color: actionColor(item.recommendation), fontSize: 12, fontWeight: 800 }}>
-                    {item.recommendation_label}
-                  </span>
-                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>{item.estimate_modifier.label}</div>
-                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>{item.profit_modifier.label}</div>
-                </td>
-                <td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-color)', fontSize: 13, fontWeight: 750 }}>
-                  {item.suggested_amount > 0 ? money(item.suggested_amount) : '—'}
-                  <div style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 400 }}>盘中上限 {money(item.intraday_cap)}</div>
-                </td>
-                <td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-color)', fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.5, minWidth: 260 }}>
-                  {item.reason}
-                  <div style={{ color: 'var(--text-muted)', marginTop: 2 }}>{item.estimate_modifier.reason}</div>
-                  <div style={{ color: 'var(--text-muted)', marginTop: 2 }}>{item.profit_modifier.reason}</div>
-                  <div style={{ color: confirmationColor(item.market_confirmation?.status), marginTop: 2 }}>{item.market_confirmation?.summary}</div>
-                </td>
-                <td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-color)', fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5, minWidth: 210 }}>
-                  {item.data_note}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-      {items.length > shown.length && (
-        <div style={{ paddingTop: 10, fontSize: 12, color: 'var(--text-muted)' }}>
-          已显示前 {shown.length} 只；完整持仓仍参与组合计算。
+    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 12, color: 'var(--text-muted)' }}>
+      {label}
+      <select
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        style={{
+          height: 32,
+          minWidth: 132,
+          padding: '0 10px',
+          borderRadius: 8,
+          border: '1px solid var(--border-color)',
+          background: 'var(--bg-secondary)',
+          color: 'var(--text-primary)',
+          fontSize: 12,
+          fontWeight: 650,
+        }}
+      >
+        {options.map(option => (
+          <option key={option.value} value={option.value}>{option.label}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function FundRecommendationTable({ items }: { items: FundRecommendation[] }) {
+  const [filter, setFilter] = useState<FundRecommendationFilter>('actionable');
+  const [displayMode, setDisplayMode] = useState('18');
+  const filtered = useMemo(() => {
+    if (filter === 'all') return items;
+    if (filter === 'add') return items.filter(item => item.recommendation === 'intraday_add_watch');
+    if (filter === 'trim') return items.filter(item => ['intraday_trim_watch', 'clear_watch'].includes(item.recommendation));
+    if (filter === 'estimate_available') return items.filter(item => item.estimate?.available);
+    return items.filter(item => item.suggested_amount > 0 || item.recommendation !== 'hold');
+  }, [filter, items]);
+  const shown = displayMode === 'all' ? filtered : filtered.slice(0, Number(displayMode));
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 10 }}>
+        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+          当前显示 <strong style={{ color: 'var(--text-primary)' }}>{shown.length}</strong> / {filtered.length} 只，组合共 {items.length} 只
         </div>
-      )}
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <SelectControl
+            label="筛选"
+            value={filter}
+            onChange={value => setFilter(value as FundRecommendationFilter)}
+            options={[
+              { value: 'actionable', label: '有动作建议' },
+              { value: 'all', label: '全部基金' },
+              { value: 'add', label: '加仓观察' },
+              { value: 'trim', label: '减仓/清仓' },
+              { value: 'estimate_available', label: '估值可用' },
+            ]}
+          />
+          <SelectControl
+            label="显示"
+            value={displayMode}
+            onChange={setDisplayMode}
+            options={[
+              { value: '18', label: '前 18 只' },
+              { value: '30', label: '前 30 只' },
+              { value: 'all', label: '全部显示' },
+            ]}
+          />
+        </div>
+      </div>
+      <div style={{ overflow: 'auto', maxHeight: displayMode === 'all' ? 760 : 560, border: '1px solid var(--border-color)', borderRadius: 10 }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 1160 }}>
+          <thead style={{ position: 'sticky', top: 0, background: 'var(--bg-primary)', zIndex: 1 }}>
+            <tr>
+              {['基金', '估值', '持有收益', '资金流', '建议', '金额', '归因', '数据'].map(label => (
+                <th key={label} style={{ textAlign: 'left', padding: '10px 8px', fontSize: 12, color: 'var(--text-muted)', borderBottom: '1px solid var(--border-color)' }}>
+                  {label}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {shown.map(item => {
+              const estimate = item.estimate;
+              const estPct = estimate.estimate_change_pct;
+              const estColor = estPct === undefined || estPct === null
+                ? 'var(--text-muted)'
+                : estPct >= 0
+                  ? '#dc2626'
+                  : '#16a34a';
+              return (
+                <tr key={`${item.name}-${item.fund_code ?? 'none'}`}>
+                  <td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-color)', minWidth: 260 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>{item.name}</div>
+                    <div style={{ fontSize: 11, color: BUCKETS[item.bucket].color, marginTop: 2 }}>
+                      {item.fund_code || '未填代码'} · {BUCKETS[item.bucket].name}
+                    </div>
+                  </td>
+                  <td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-color)' }}>
+                    {estimate.available ? (
+                      <div>
+                        <div style={{ fontSize: 14, fontWeight: 800, color: estColor }}>
+                          {estPct !== undefined && estPct !== null ? `${estPct >= 0 ? '+' : ''}${estPct.toFixed(2)}%` : '—'}
+                        </div>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{estimate.estimate_time || estimate.nav_date}</div>
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{estimate.message}</div>
+                    )}
+                  </td>
+                  <td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-color)' }}>
+                    <div style={{ fontSize: 13, fontWeight: 800, color: (item.profit_amount ?? 0) >= 0 ? '#dc2626' : '#16a34a' }}>
+                      {item.profit_amount === null || item.profit_amount === undefined
+                        ? '—'
+                        : `${item.profit_amount >= 0 ? '+' : ''}${money(item.profit_amount)}`}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                      {item.profit_rate === null || item.profit_rate === undefined
+                        ? '收益率未录入'
+                        : `${item.profit_rate >= 0 ? '+' : ''}${item.profit_rate.toFixed(2)}%`}
+                    </div>
+                  </td>
+                  <td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-color)', minWidth: 170 }}>
+                    <MarketBadge confirmation={item.market_confirmation} />
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 5, lineHeight: 1.45 }}>
+                      {item.market_confirmation?.sector_name || item.market_confirmation?.date || '—'}
+                      {item.market_confirmation?.evidence?.score !== undefined && ` · ${item.market_confirmation.evidence.score}分`}
+                    </div>
+                  </td>
+                  <td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-color)' }}>
+                    <span style={{ display: 'inline-flex', padding: '4px 9px', borderRadius: 999, background: `${actionColor(item.recommendation)}18`, color: actionColor(item.recommendation), fontSize: 12, fontWeight: 800 }}>
+                      {item.recommendation_label}
+                    </span>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>{item.estimate_modifier.label}</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>{item.profit_modifier.label}</div>
+                  </td>
+                  <td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-color)', fontSize: 13, fontWeight: 750 }}>
+                    {item.suggested_amount > 0 ? money(item.suggested_amount) : '—'}
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 400 }}>盘中上限 {money(item.intraday_cap)}</div>
+                  </td>
+                  <td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-color)', fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.5, minWidth: 260 }}>
+                    {item.reason}
+                    <div style={{ color: 'var(--text-muted)', marginTop: 2 }}>{item.estimate_modifier.reason}</div>
+                    <div style={{ color: 'var(--text-muted)', marginTop: 2 }}>{item.profit_modifier.reason}</div>
+                    <div style={{ color: confirmationColor(item.market_confirmation?.status), marginTop: 2 }}>{item.market_confirmation?.summary}</div>
+                  </td>
+                  <td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-color)', fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5, minWidth: 210 }}>
+                    {item.data_note}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {shown.length === 0 && (
+          <div style={{ padding: 28, textAlign: 'center', fontSize: 13, color: 'var(--text-muted)' }}>
+            当前筛选下暂无基金
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -847,7 +971,8 @@ export default function PortfolioCenter() {
           </p>
         </div>
         <Link
-          to="/backtest"
+          to="/backtest?portfolioA=current"
+          onClick={() => snapshot && saveBacktestProxy(snapshot)}
           style={{
             display: 'inline-flex',
             alignItems: 'center',
@@ -863,7 +988,7 @@ export default function PortfolioCenter() {
           }}
         >
           <PieChart size={15} />
-          去回测目标组合
+          用当前持仓回测
         </Link>
       </div>
 
@@ -1153,11 +1278,12 @@ export default function PortfolioCenter() {
             <div><strong style={{ color: 'var(--text-primary)' }}>已接入：</strong>A股宽基参考托底大盘信号，行业/资源基金参考板块资金流；黄金和海外仓暂不混用A股资金流。</div>
           </div>
           <Link
-            to="/backtest"
+            to="/backtest?portfolioA=current"
+            onClick={() => snapshot && saveBacktestProxy(snapshot)}
             style={{ marginTop: 14, display: 'inline-flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderRadius: 9, background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', color: 'var(--text-primary)', textDecoration: 'none', fontSize: 13, fontWeight: 700 }}
           >
             <PieChart size={15} />
-            打开组合回测
+            用当前持仓打开回测
           </Link>
         </Card>
       </div>
