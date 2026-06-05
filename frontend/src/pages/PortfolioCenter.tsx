@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   ArrowDownRight, ArrowUpRight, BadgeInfo, CheckCircle2, Coins, Gauge,
-  Layers, Loader2, PieChart, Plus, Save, ShieldCheck, Target, Trash2,
+  Layers, Loader2, PieChart, Plus, Save, Search, ShieldCheck, Target, Trash2,
   WalletCards, Waves,
 } from 'lucide-react';
 
@@ -10,6 +10,7 @@ const API = '/api/v1';
 const PORTFOLIO_DRAFT_KEY = 'portfolio-center-draft-v1';
 const PORTFOLIO_CODE_BOOK_KEY = 'portfolio-center-fund-code-book-v1';
 const PORTFOLIO_PROFIT_BOOK_KEY = 'portfolio-center-profit-book-v1';
+const PORTFOLIO_SECTOR_BOOK_KEY = 'portfolio-center-flow-sector-book-v1';
 const PORTFOLIO_BACKTEST_A_KEY = 'portfolio-center-backtest-a-v1';
 
 type BucketId =
@@ -21,7 +22,7 @@ type BucketId =
   | 'themes'
   | 'fragments';
 
-type ActionType = 'add' | 'trim' | 'hold' | 'clear' | 'merge_watch';
+type ActionType = 'add' | 'add_watch' | 'trim' | 'trim_watch' | 'hold' | 'clear' | 'merge_watch';
 
 interface Holding {
   id?: number;
@@ -31,6 +32,7 @@ interface Holding {
   profit_amount?: number | null;
   profit_rate?: number | null;
   bucket: Exclude<BucketId, 'cash'>;
+  flow_sector_name?: string | null;
   note?: string | null;
 }
 
@@ -74,6 +76,8 @@ interface MarketConfirmation {
   factor: number;
   date?: string | null;
   sector_name?: string | null;
+  operation_permission?: string;
+  permission_label?: string;
   summary: string;
   evidence: Record<string, any>;
 }
@@ -85,6 +89,7 @@ interface FundRecommendation {
   amount: number;
   profit_amount?: number | null;
   profit_rate?: number | null;
+  flow_sector_name?: string | null;
   recommendation: string;
   recommendation_label: string;
   suggested_amount: number;
@@ -129,6 +134,7 @@ interface Recommendation {
   market_confirmations: Partial<Record<BucketId, MarketConfirmation>>;
   actions: RecommendationAction[];
   fund_recommendations: FundRecommendation[];
+  sector_options: string[];
   intraday_policy: {
     source: string;
     max_action: number;
@@ -189,6 +195,8 @@ function pct(v: number) {
 
 function actionColor(type: ActionType | string) {
   if (type === 'add' || type === 'intraday_add_watch') return '#2563eb';
+  if (type === 'add_watch') return '#d97706';
+  if (type === 'trim_watch') return '#d97706';
   if (type === 'trim' || type === 'clear' || type === 'clear_watch' || type === 'intraday_trim_watch') return '#dc2626';
   if (type === 'merge_watch') return '#d97706';
   return '#16a34a';
@@ -197,7 +205,9 @@ function actionColor(type: ActionType | string) {
 function actionLabel(type: ActionType | string) {
   return {
     add: '加仓',
+    add_watch: '加仓观察',
     trim: '减仓',
+    trim_watch: '减仓观察',
     hold: '持有',
     clear: '清仓',
     merge_watch: '合并观察',
@@ -219,6 +229,11 @@ function formatYi(v?: number | null) {
 function formatSigma(v?: number | null) {
   if (v === undefined || v === null || Number.isNaN(v)) return '—';
   return `${v >= 0 ? '+' : ''}${Number(v).toFixed(2)}σ`;
+}
+
+function formatSignedPct(v?: number | null) {
+  if (v === undefined || v === null || Number.isNaN(v)) return '—';
+  return `${v >= 0 ? '+' : ''}${Number(v).toFixed(2)}%`;
 }
 
 function MarketBadge({ confirmation }: { confirmation?: MarketConfirmation }) {
@@ -320,8 +335,38 @@ function applyProfitBook(snapshot: Snapshot): Snapshot {
   };
 }
 
+function loadSectorBook(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(PORTFOLIO_SECTOR_BOOK_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveSectorBook(holdings: Holding[]) {
+  const current = loadSectorBook();
+  const next = { ...current };
+  holdings.forEach(h => {
+    const sector = (h.flow_sector_name ?? '').trim();
+    if (h.name && sector) next[h.name] = sector;
+  });
+  localStorage.setItem(PORTFOLIO_SECTOR_BOOK_KEY, JSON.stringify(next));
+}
+
+function applySectorBook(snapshot: Snapshot): Snapshot {
+  const book = loadSectorBook();
+  return {
+    ...snapshot,
+    holdings: snapshot.holdings.map(h => ({
+      ...h,
+      flow_sector_name: h.flow_sector_name || book[h.name] || '',
+    })),
+  };
+}
+
 function applyLocalBooks(snapshot: Snapshot): Snapshot {
-  return applyProfitBook(applyCodeBook(snapshot));
+  return applySectorBook(applyProfitBook(applyCodeBook(snapshot)));
 }
 
 function normaliseWeights(weights: Record<string, number>) {
@@ -484,6 +529,133 @@ function SignedNumberInput({
   );
 }
 
+function SectorSelect({
+  value,
+  options,
+  onChange,
+  width = 170,
+}: {
+  value?: string | null;
+  options: string[];
+  onChange: (value: string | null) => void;
+  width?: number;
+}) {
+  const [query, setQuery] = useState(value ?? '');
+  const [open, setOpen] = useState(false);
+  const trimmed = query.trim();
+  const filtered = useMemo(() => {
+    if (!trimmed) return options.slice(0, 30);
+    return options
+      .filter(name => name.toLowerCase().includes(trimmed.toLowerCase()))
+      .slice(0, 30);
+  }, [options, trimmed]);
+
+  useEffect(() => {
+    setQuery(value ?? '');
+  }, [value]);
+
+  const choose = (name: string | null) => {
+    setQuery(name ?? '');
+    setOpen(false);
+    onChange(name);
+  };
+
+  return (
+    <div style={{ position: 'relative', width }}>
+      <div style={{ position: 'relative' }}>
+        <Search size={13} style={{ position: 'absolute', left: 8, top: 9, color: 'var(--text-muted)', pointerEvents: 'none' }} />
+        <input
+          value={query}
+          placeholder="搜索板块/自动匹配"
+          onFocus={() => setOpen(true)}
+          onBlur={() => window.setTimeout(() => setOpen(false), 140)}
+          onChange={e => {
+            setQuery(e.target.value);
+            setOpen(true);
+          }}
+          style={{
+            width: '100%',
+            padding: '7px 9px 7px 27px',
+            borderRadius: 8,
+            border: '1px solid var(--border-color)',
+            background: 'var(--bg-secondary)',
+            color: 'var(--text-primary)',
+            fontSize: 12,
+            boxSizing: 'border-box',
+          }}
+        />
+      </div>
+      {open && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 36,
+            left: 0,
+            width: Math.max(width, 220),
+            maxHeight: 240,
+            overflowY: 'auto',
+            background: 'var(--bg-primary)',
+            border: '1px solid var(--border-color)',
+            borderRadius: 10,
+            boxShadow: 'var(--shadow-md)',
+            zIndex: 20,
+          }}
+        >
+          <button
+            type="button"
+            onMouseDown={e => {
+              e.preventDefault();
+              choose(null);
+            }}
+            style={{
+              width: '100%',
+              padding: '9px 10px',
+              border: 'none',
+              borderBottom: '1px solid var(--border-color)',
+              background: !value ? '#6366f114' : 'transparent',
+              color: '#4f46e5',
+              textAlign: 'left',
+              cursor: 'pointer',
+              fontSize: 12,
+              fontWeight: 750,
+            }}
+          >
+            自动匹配
+          </button>
+          {filtered.map(name => (
+            <button
+              key={name}
+              type="button"
+              onMouseDown={e => {
+                e.preventDefault();
+                choose(name);
+              }}
+              style={{
+                width: '100%',
+                padding: '8px 10px',
+                border: 'none',
+                borderBottom: '1px solid var(--border-color)',
+                background: name === value ? '#6366f114' : 'transparent',
+                color: name === value ? '#4f46e5' : 'var(--text-primary)',
+                textAlign: 'left',
+                cursor: 'pointer',
+                fontSize: 12,
+              }}
+            >
+              {name}
+            </button>
+          ))}
+          {filtered.length === 0 && (
+            <div style={{ padding: 10, fontSize: 12, color: 'var(--text-muted)' }}>
+              没有匹配板块
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AllocationBar({ rows }: { rows: BucketRow[] }) {
   return (
     <div>
@@ -615,6 +787,14 @@ function MarketConfirmationPanel({ confirmations }: { confirmations: Recommendat
                 <span style={{ color: 'var(--text-muted)' }}>异常 {formatSigma(ev.z_score)}</span>
               </div>
             )}
+            {bucket === 'gold' && (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 6, marginTop: 10, fontSize: 11 }}>
+                <span style={{ color: 'var(--text-muted)' }}>金价MA20偏离 {formatSignedPct(ev.gold_ma20_deviation_pct)}</span>
+                <span style={{ color: 'var(--text-muted)' }}>美元5日趋势 {formatSignedPct(ev.dollar_trend_5d_pct)}</span>
+                <span style={{ color: 'var(--text-muted)' }}>金价 {ev.gold_close ? Number(ev.gold_close).toFixed(2) : '—'}</span>
+                <span style={{ color: '#d97706', fontWeight: 800 }}>{item.permission_label || '人工确认'}</span>
+              </div>
+            )}
             {topSectors.length > 0 && (
               <div style={{ display: 'grid', gap: 4, marginTop: 10 }}>
                 {topSectors.map((sector: MarketConfirmation) => (
@@ -671,7 +851,15 @@ function SelectControl({
   );
 }
 
-function FundRecommendationTable({ items }: { items: FundRecommendation[] }) {
+function FundRecommendationTable({
+  items,
+  sectorOptions,
+  onSectorChange,
+}: {
+  items: FundRecommendation[];
+  sectorOptions: string[];
+  onSectorChange: (fundName: string, sectorName: string | null) => void;
+}) {
   const [filter, setFilter] = useState<FundRecommendationFilter>('actionable');
   const [displayMode, setDisplayMode] = useState('18');
   const filtered = useMemo(() => {
@@ -767,6 +955,14 @@ function FundRecommendationTable({ items }: { items: FundRecommendation[] }) {
                   </td>
                   <td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-color)', minWidth: 170 }}>
                     <MarketBadge confirmation={item.market_confirmation} />
+                    <div style={{ marginTop: 6 }}>
+                      <SectorSelect
+                        value={item.flow_sector_name}
+                        options={sectorOptions}
+                        onChange={value => onSectorChange(item.name, value)}
+                        width={150}
+                      />
+                    </div>
                     <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 5, lineHeight: 1.45 }}>
                       {item.market_confirmation?.sector_name || item.market_confirmation?.date || '—'}
                       {item.market_confirmation?.evidence?.score !== undefined && ` · ${item.market_confirmation.evidence.score}分`}
@@ -860,6 +1056,7 @@ export default function PortfolioCenter() {
       saveDraft(next);
       saveCodeBook(holdings);
       saveProfitBook(holdings);
+      saveSectorBook(holdings);
       return next;
     });
   };
@@ -875,6 +1072,7 @@ export default function PortfolioCenter() {
       saveDraft(next);
       saveCodeBook(next.holdings);
       saveProfitBook(next.holdings);
+      saveSectorBook(next.holdings);
       return next;
     });
   };
@@ -886,6 +1084,18 @@ export default function PortfolioCenter() {
       saveDraft(next);
       return next;
     });
+  };
+
+  const updateHoldingSectorByName = (fundName: string, sectorName: string | null) => {
+    setSnapshot(prev => {
+      if (!prev) return prev;
+      const holdings = prev.holdings.map(h => h.name === fundName ? { ...h, flow_sector_name: sectorName } : h);
+      const next = { ...prev, holdings };
+      saveDraft(next);
+      saveSectorBook(holdings);
+      return next;
+    });
+    setSavedText('已更新资金流板块，点击保存后写入数据库并重新生成建议');
   };
 
   const saveSnapshot = async () => {
@@ -903,6 +1113,7 @@ export default function PortfolioCenter() {
       const payload = await res.json();
       saveCodeBook(snapshot.holdings);
       saveProfitBook(snapshot.holdings);
+      saveSectorBook(snapshot.holdings);
       setData(payload);
       setSnapshot(applyLocalBooks(payload.snapshot));
       localStorage.removeItem(PORTFOLIO_DRAFT_KEY);
@@ -1057,7 +1268,7 @@ export default function PortfolioCenter() {
           <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 980 }}>
             <thead style={{ position: 'sticky', top: 0, background: 'var(--bg-primary)', zIndex: 1 }}>
               <tr>
-                {['基金代码', '基金名称', '金额', '收益金额', '收益率', '资产桶', '操作'].map(label => (
+                {['基金代码', '基金名称', '金额', '收益金额', '收益率', '资产桶', '资金流板块', '操作'].map(label => (
                   <th key={label} style={{ textAlign: 'left', padding: '10px 9px', fontSize: 12, color: 'var(--text-muted)', borderBottom: '1px solid var(--border-color)' }}>{label}</th>
                 ))}
               </tr>
@@ -1099,6 +1310,13 @@ export default function PortfolioCenter() {
                         <option key={key} value={key}>{meta.name}</option>
                       ))}
                     </select>
+                  </td>
+                  <td style={{ padding: '8px 9px', borderBottom: '1px solid var(--border-color)' }}>
+                    <SectorSelect
+                      value={h.flow_sector_name}
+                      options={data.sector_options ?? []}
+                      onChange={value => updateHolding(index, { flow_sector_name: value })}
+                    />
                   </td>
                   <td style={{ padding: '8px 9px', borderBottom: '1px solid var(--border-color)' }}>
                     <button
@@ -1160,7 +1378,7 @@ export default function PortfolioCenter() {
         <div className="portfolio-signal-grid" style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.1fr) minmax(280px, 0.9fr)', gap: 18 }}>
           <div style={{ display: 'grid', gap: 12 }}>
             {data.actions.slice(0, 8).map(action => {
-              const Icon = action.type === 'add' ? ArrowUpRight : ArrowDownRight;
+              const Icon = action.type === 'add' || action.type === 'add_watch' ? ArrowUpRight : ArrowDownRight;
               return (
                 <div key={`${action.type}-${action.target_name}`} style={{ display: 'flex', gap: 10 }}>
                   <Icon size={18} color={actionColor(action.type)} style={{ marginTop: 2, flexShrink: 0 }} />
@@ -1224,7 +1442,11 @@ export default function PortfolioCenter() {
           title="单基金盘中估值建议"
           subtitle={`${data.intraday_policy.role} 数据源：天天基金/Eastmoney 估值接口`}
         />
-        <FundRecommendationTable items={data.fund_recommendations ?? []} />
+        <FundRecommendationTable
+          items={data.fund_recommendations ?? []}
+          sectorOptions={data.sector_options ?? []}
+          onSectorChange={updateHoldingSectorByName}
+        />
       </Card>
 
       <div className="portfolio-two-column" style={{ display: 'grid', gridTemplateColumns: 'minmax(320px, 0.95fr) minmax(360px, 1.05fr)', gap: 16, marginBottom: 16 }}>

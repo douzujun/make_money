@@ -46,6 +46,7 @@ class PortfolioHolding(Base):
     profit_amount = Column(Float, nullable=True)
     profit_rate = Column(Float, nullable=True)
     bucket = Column(String, nullable=False, index=True)
+    flow_sector_name = Column(String, nullable=True, index=True)
     note = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

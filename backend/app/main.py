@@ -57,9 +57,58 @@ def ensure_lightweight_schema_updates():
             conn.exec_driver_sql("ALTER TABLE portfolio_holdings ADD COLUMN profit_amount FLOAT")
         if "profit_rate" not in columns:
             conn.exec_driver_sql("ALTER TABLE portfolio_holdings ADD COLUMN profit_rate FLOAT")
+        if "flow_sector_name" not in columns:
+            conn.exec_driver_sql("ALTER TABLE portfolio_holdings ADD COLUMN flow_sector_name VARCHAR")
 
 
 ensure_lightweight_schema_updates()
+
+
+def init_portfolio_macro_assets():
+    """Ensure portfolio macro confirmation assets exist for price refresh."""
+    db = SessionLocal()
+    try:
+        defaults = [
+            Asset(
+                id="DX-Y.NYB",
+                symbol="DXY",
+                name="US Dollar Index",
+                asset_type="index",
+                exchange="ICE",
+                country="US",
+                currency="USD",
+                data_source="yfinance",
+                source_symbol="DX-Y.NYB",
+                is_active=True,
+                is_watched=True,
+            ),
+            Asset(
+                id="GC=F",
+                symbol="GC=F",
+                name="Gold Futures",
+                asset_type="commodity",
+                exchange="COMEX",
+                country="US",
+                currency="USD",
+                data_source="yfinance",
+                source_symbol="GC=F",
+                is_active=True,
+                is_watched=True,
+            ),
+        ]
+        created = 0
+        for asset in defaults:
+            if not db.query(Asset).filter(Asset.id == asset.id).first():
+                db.add(asset)
+                created += 1
+        if created:
+            db.commit()
+            logging.getLogger("main").info("Portfolio macro assets initialized, created=%s", created)
+    except Exception as e:
+        db.rollback()
+        logging.getLogger("main").error("Failed to initialize portfolio macro assets: %s", e)
+    finally:
+        db.close()
 
 # Initialize indicator templates and default indicators
 def init_indicators():
@@ -111,6 +160,7 @@ def init_default_admin():
         db.close()
 
 init_indicators()
+init_portfolio_macro_assets()
 init_default_admin()
 
 

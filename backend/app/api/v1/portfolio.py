@@ -13,8 +13,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.models.asset import Asset
 from app.models.big_money import BigMoneySignal
 from app.models.portfolio import PortfolioHolding, PortfolioSnapshot
+from app.models.price_data import PriceData
 from app.models.sector_flow import SectorFundFlow
 
 router = APIRouter(prefix="/portfolio", tags=["portfolio"])
@@ -24,6 +26,9 @@ INTRADAY_MAX_ACTION = 3000.0
 INTRADAY_TIMEOUT = 4
 ESTIMATE_CACHE_TTL = 180
 _estimate_cache: Dict[str, Dict] = {}
+
+GOLD_ASSET_ID = "GC=F"
+DOLLAR_INDEX_ASSET_ID = "DX-Y.NYB"
 
 
 TARGET_BUCKETS = {
@@ -194,6 +199,7 @@ class HoldingIn(BaseModel):
     profit_amount: Optional[float] = None
     profit_rate: Optional[float] = None
     bucket: str
+    flow_sector_name: Optional[str] = None
     note: Optional[str] = None
 
 
@@ -225,6 +231,7 @@ def _snapshot_payload(snapshot: PortfolioSnapshot) -> Dict:
                 "profit_amount": h.profit_amount if h.profit_amount is not None else KNOWN_PROFITS.get(h.name, {}).get("profit_amount"),
                 "profit_rate": h.profit_rate if h.profit_rate is not None else KNOWN_PROFITS.get(h.name, {}).get("profit_rate"),
                 "bucket": h.bucket,
+                "flow_sector_name": h.flow_sector_name,
                 "note": h.note,
             }
             for h in sorted(snapshot.holdings, key=lambda item: item.amount, reverse=True)
@@ -257,6 +264,7 @@ def _ensure_snapshot(db: Session) -> PortfolioSnapshot:
             profit_amount=h.get("profit_amount", KNOWN_PROFITS.get(h["name"], {}).get("profit_amount")),
             profit_rate=h.get("profit_rate", KNOWN_PROFITS.get(h["name"], {}).get("profit_rate")),
             bucket=h["bucket"],
+            flow_sector_name=h.get("flow_sector_name"),
         )
         for h in DEFAULT_HOLDINGS
     ]
@@ -447,16 +455,131 @@ def _latest_big_money_confirmation(db: Session) -> Dict[str, Any]:
     }
 
 
+def _price_history(db: Session, asset_id: str, limit: int = 60) -> List[PriceData]:
+    rows = (
+        db.query(PriceData)
+        .filter(PriceData.asset_id == asset_id, PriceData.interval == "1d")
+        .order_by(PriceData.date.desc())
+        .limit(limit)
+        .all()
+    )
+    return list(reversed(rows))
+
+
+def _gold_macro_confirmation(db: Session) -> Dict[str, Any]:
+    gold_rows = _price_history(db, GOLD_ASSET_ID, 40)
+    dollar_rows = _price_history(db, DOLLAR_INDEX_ASSET_ID, 20)
+    base = {
+        "factor": 0.0,
+        "operation_permission": "manual_confirm",
+        "permission_label": "人工确认",
+        "sector_name": None,
+    }
+    if len(gold_rows) < 20:
+        return {
+            **base,
+            "status": "unavailable",
+            "label": "黄金价格数据缺失",
+            "date": None,
+            "summary": "黄金仓位占比较高，当前缺少至少20个交易日金价数据；禁止自动加仓，只能人工确认。",
+            "evidence": {
+                "gold_asset_id": GOLD_ASSET_ID,
+                "dollar_asset_id": DOLLAR_INDEX_ASSET_ID,
+                "gold_days": len(gold_rows),
+                "dollar_days": len(dollar_rows),
+            },
+        }
+
+    latest_gold = gold_rows[-1]
+    ma20 = sum(row.close for row in gold_rows[-20:]) / 20
+    gold_dev = ((latest_gold.close - ma20) / ma20) * 100 if ma20 else 0.0
+    gold_trend_5d = (
+        ((latest_gold.close - gold_rows[-6].close) / gold_rows[-6].close) * 100
+        if len(gold_rows) >= 6 and gold_rows[-6].close
+        else None
+    )
+
+    evidence = {
+        "gold_asset_id": GOLD_ASSET_ID,
+        "dollar_asset_id": DOLLAR_INDEX_ASSET_ID,
+        "gold_date": latest_gold.date.isoformat(),
+        "gold_close": round(latest_gold.close, 4),
+        "gold_ma20": round(ma20, 4),
+        "gold_ma20_deviation_pct": round(gold_dev, 2),
+        "gold_trend_5d_pct": round(gold_trend_5d, 2) if gold_trend_5d is not None else None,
+        "gold_days": len(gold_rows),
+        "dollar_days": len(dollar_rows),
+    }
+
+    if len(dollar_rows) < 6:
+        return {
+            **base,
+            "status": "neutral",
+            "label": "黄金宏观信号不完整",
+            "date": latest_gold.date.isoformat(),
+            "summary": "已接入金价20日均线偏离度，但美元指数缺失或样本不足；黄金操作权限保持人工确认，不自动加仓。",
+            "evidence": evidence,
+        }
+
+    latest_dollar = dollar_rows[-1]
+    dollar_trend_5d = ((latest_dollar.close - dollar_rows[-6].close) / dollar_rows[-6].close) * 100
+    evidence.update({
+        "dollar_date": latest_dollar.date.isoformat(),
+        "dollar_close": round(latest_dollar.close, 4),
+        "dollar_trend_5d_pct": round(dollar_trend_5d, 2),
+    })
+
+    gold_above_ma = gold_dev >= 1.0
+    gold_below_ma = gold_dev <= -1.0
+    dollar_weaker = dollar_trend_5d <= -0.5
+    dollar_stronger = dollar_trend_5d >= 0.5
+    if gold_above_ma and dollar_weaker:
+        status = "supportive"
+        label = "黄金加仓观察"
+        factor = 0.06
+        summary = "金价高于20日均线且美元指数走弱，黄金防守仓信号偏正；因仓位已接近目标，仅允许人工确认后小额观察。"
+    elif gold_below_ma and dollar_stronger:
+        status = "caution"
+        label = "黄金减仓观察"
+        factor = -0.08
+        summary = "金价跌破20日均线且美元指数走强，黄金仓位进入减仓观察；避免杀跌，需人工确认后分批处理。"
+    else:
+        status = "neutral"
+        label = "黄金持有确认"
+        factor = 0.0
+        summary = "金价20日均线与美元指数信号未形成同向确认，黄金仓位以持有和人工确认优先。"
+
+    return {
+        **base,
+        "status": status,
+        "label": label,
+        "factor": factor,
+        "date": max(latest_gold.date, latest_dollar.date).isoformat(),
+        "summary": summary,
+        "evidence": evidence,
+    }
+
+
+def _normalise_sector_name(sector_name: Optional[str]) -> Optional[str]:
+    if not sector_name:
+        return None
+    value = sector_name.strip()
+    return value or None
+
+
+def _sector_exists(sector_name: str, db: Session) -> bool:
+    return bool(
+        db.query(SectorFundFlow.id)
+        .filter(SectorFundFlow.sector_type == "industry", SectorFundFlow.sector_name == sector_name)
+        .first()
+    )
+
+
 def _match_sector_name(fund_name: str, db: Session) -> Optional[str]:
     for item in FUND_SECTOR_KEYWORDS:
         if any(keyword in fund_name for keyword in item["keywords"]):
             wanted = item["sector"]
-            exists = (
-                db.query(SectorFundFlow.id)
-                .filter(SectorFundFlow.sector_type == "industry", SectorFundFlow.sector_name == wanted)
-                .first()
-            )
-            return wanted if exists else None
+            return wanted if _sector_exists(wanted, db) else None
     return None
 
 
@@ -464,6 +587,7 @@ def _build_sector_signal(row: SectorFundFlow, history: List[SectorFundFlow]) -> 
     recent3_flow = sum(item.net_inflow_main or 0 for item in history[:3])
     recent5_flow = sum(item.net_inflow_main or 0 for item in history[:5])
     inflow_days_5 = sum(1 for item in history[:5] if (item.net_inflow_main or 0) > 0)
+    negative_flow_days_3 = sum(1 for item in history[:3] if item.net_inflow_main is not None and item.net_inflow_main < 0)
     change_3d = sum(item.change_pct or 0 for item in history[:3])
     flow_yi = (row.net_inflow_main or 0) / 10000
 
@@ -508,13 +632,21 @@ def _build_sector_signal(row: SectorFundFlow, history: List[SectorFundFlow]) -> 
             "recent_3d_flow_yi": round(recent3_flow / 10000, 2),
             "recent_5d_flow_yi": round(recent5_flow / 10000, 2),
             "inflow_days_5": inflow_days_5,
+            "negative_flow_days_3": negative_flow_days_3,
             "change_3d": round(change_3d, 2),
             "score": score,
         },
     }
 
 
-def _sector_confirmation_for_fund(fund_name: str, bucket: str, db: Session) -> Dict[str, Any]:
+def _sector_confirmation_for_fund(
+    fund_name: str,
+    bucket: str,
+    db: Session,
+    manual_sector_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    if bucket == "gold":
+        return _gold_macro_confirmation(db)
     if bucket in ("gold", "overseas_core", "fragments"):
         return {
             "status": "not_applicable",
@@ -526,7 +658,18 @@ def _sector_confirmation_for_fund(fund_name: str, bucket: str, db: Session) -> D
             "evidence": {},
         }
 
-    sector_name = _match_sector_name(fund_name, db)
+    manual = _normalise_sector_name(manual_sector_name)
+    if manual and not _sector_exists(manual, db):
+        return {
+            "status": "unavailable",
+            "label": "手动行业无数据",
+            "factor": 0.0,
+            "date": None,
+            "sector_name": manual,
+            "summary": "已手动选择行业，但板块资金流数据库中暂无该行业记录。",
+            "evidence": {},
+        }
+    sector_name = manual or _match_sector_name(fund_name, db)
     if not sector_name:
         return {
             "status": "unavailable",
@@ -580,18 +723,107 @@ def _sector_confirmation_for_fund(fund_name: str, bucket: str, db: Session) -> D
     return _build_sector_signal(rows[0], rows)
 
 
+def _dedupe_sector_confirmations(confirmations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    rank = {"caution": 3, "supportive": 2, "neutral": 1}
+    by_sector: Dict[str, Dict[str, Any]] = {}
+    for item in confirmations:
+        sector_name = item.get("sector_name")
+        if not sector_name:
+            continue
+        current = by_sector.get(sector_name)
+        if not current:
+            by_sector[sector_name] = item
+            continue
+        item_rank = rank.get(item.get("status"), 0)
+        current_rank = rank.get(current.get("status"), 0)
+        item_flow = abs(item.get("evidence", {}).get("latest_net_inflow_yi") or 0)
+        current_flow = abs(current.get("evidence", {}).get("latest_net_inflow_yi") or 0)
+        if (item_rank, item_flow) > (current_rank, current_flow):
+            by_sector[sector_name] = item
+    return list(by_sector.values())
+
+
+def _top_sector_evidence(confirmation: Dict[str, Any]) -> List[Dict[str, Any]]:
+    evidence = confirmation.get("evidence") or {}
+    top = evidence.get("top_sectors")
+    return top if isinstance(top, list) else []
+
+
+def _has_rebound_trim_trigger(confirmation: Dict[str, Any]) -> bool:
+    """反弹减仓：主要行业当日涨幅 >= 1.5%，且主力净流入转为非负。"""
+    for item in _top_sector_evidence(confirmation):
+        ev = item.get("evidence") or {}
+        change = ev.get("latest_change_pct")
+        flow = ev.get("latest_net_inflow_yi")
+        if change is not None and flow is not None and change >= 1.5 and flow >= 0:
+            return True
+    return False
+
+
+def _has_risk_trim_trigger(confirmation: Dict[str, Any]) -> bool:
+    """风控减仓：桶级仍偏弱，且主要行业主力净流入仍为负。"""
+    if confirmation.get("status") != "caution":
+        return False
+    for item in _top_sector_evidence(confirmation):
+        flow = (item.get("evidence") or {}).get("latest_net_inflow_yi")
+        if flow is not None and flow < 0:
+            return True
+    return False
+
+
+def _risk_trim_multiplier(confirmation: Dict[str, Any]) -> Dict[str, Any]:
+    top = _top_sector_evidence(confirmation)
+    if not top:
+        return {"multiplier": 0.0, "label": "风控证据不足"}
+
+    kill_drop = False
+    sustained_weak = False
+    extreme_weak = False
+    for item in top:
+        ev = item.get("evidence") or {}
+        latest_change = ev.get("latest_change_pct")
+        change_3d = ev.get("change_3d")
+        latest_flow = ev.get("latest_net_inflow_yi")
+        recent3_flow = ev.get("recent_3d_flow_yi")
+        negative_days = ev.get("negative_flow_days_3") or 0
+
+        if (latest_change is not None and latest_change <= -1.5) or (change_3d is not None and change_3d <= -5):
+            kill_drop = True
+        if negative_days >= 3 or ((recent3_flow or 0) < 0 and (latest_flow or 0) < 0):
+            sustained_weak = True
+        if (latest_flow or 0) <= -3 and (recent3_flow or 0) <= -6:
+            extreme_weak = True
+
+    if kill_drop:
+        return {
+            "multiplier": 0.35,
+            "label": "杀跌刹车",
+            "reason": "资金流偏弱但价格已明显杀跌，当日只允许 35% 小额风控，避免卖在低位。",
+        }
+    if extreme_weak:
+        return {
+            "multiplier": 0.80,
+            "label": "极端弱势升档",
+            "reason": "主要行业最新与近3日资金流均大幅为负，且未触发杀跌刹车，执行 80% 风控减仓。",
+        }
+    if sustained_weak:
+        return {
+            "multiplier": 0.75,
+            "label": "连续弱势升档",
+            "reason": "主要行业近3个有效资金流日持续偏弱，且未触发杀跌刹车，执行 75% 风控减仓。",
+        }
+    return {
+        "multiplier": 0.60,
+        "label": "普通风控减仓",
+        "reason": "行业资金流偏弱但未形成连续弱势升档，执行 60% 小额风控减仓。",
+    }
+
+
 def _bucket_market_confirmations(snapshot: PortfolioSnapshot, db: Session) -> Dict[str, Dict[str, Any]]:
     big_money = _latest_big_money_confirmation(db)
     result: Dict[str, Dict[str, Any]] = {
         "a_share_core": big_money,
-        "gold": {
-            "status": "not_applicable",
-            "label": "黄金独立确认",
-            "factor": 0.0,
-            "date": None,
-            "summary": "黄金仓位不使用A股板块资金流确认，后续应接入金价、美元指数、美债利率。",
-            "evidence": {},
-        },
+        "gold": _gold_macro_confirmation(db),
         "overseas_core": {
             "status": "not_applicable",
             "label": "海外独立确认",
@@ -612,11 +844,13 @@ def _bucket_market_confirmations(snapshot: PortfolioSnapshot, db: Session) -> Di
 
     for bucket in ("themes", "commodities"):
         confirmations = [
-            _sector_confirmation_for_fund(h.name, h.bucket, db)
+            _sector_confirmation_for_fund(h.name, h.bucket, db, h.flow_sector_name)
             for h in snapshot.holdings
             if h.bucket == bucket
         ]
-        actionable = [c for c in confirmations if c["status"] in ("supportive", "caution", "neutral")]
+        actionable = _dedupe_sector_confirmations([
+            c for c in confirmations if c["status"] in ("supportive", "caution", "neutral")
+        ])
         if not actionable:
             result[bucket] = {
                 "status": "unavailable",
@@ -675,20 +909,40 @@ def _apply_market_to_action(action: Dict, confirmation: Optional[Dict[str, Any]]
     original = float(action["amount"])
     adjusted_amount = original
     if action["type"] == "add":
-        adjusted_amount = original * (1 + factor)
         if confirmation["status"] == "caution":
-            adjusted["execution"] = f"{action['execution']} 市场确认偏弱，先降级为观察或只执行小额试探。"
+            adjusted["type"] = "add_watch"
+            adjusted["amount"] = 0
+            adjusted["reason"] = f"{action['reason']} 但市场确认偏弱，取消当日加仓执行。"
+            adjusted["execution"] = "不执行当日加仓；仅保留为观察，等待托底/行业资金流转中性或转强后再恢复小额加仓。"
         elif confirmation["status"] == "supportive":
+            adjusted_amount = original * (1 + factor)
             adjusted["execution"] = f"{action['execution']} 市场确认支持，但仍不突破单日预算。"
+        else:
+            adjusted_amount = original * (1 + factor)
     elif action["type"] == "trim":
         if confirmation["status"] == "caution":
-            adjusted_amount = original * (1 + abs(factor))
-            adjusted["execution"] = f"{action['execution']} 市场确认偏弱，减仓优先级上调。"
+            if _has_risk_trim_trigger(confirmation):
+                trim_rule = _risk_trim_multiplier(confirmation)
+                adjusted_amount = original * trim_rule["multiplier"]
+                adjusted["execution"] = f"风控减仓触发：{trim_rule['label']}。{trim_rule['reason']}"
+            else:
+                adjusted["type"] = "trim_watch"
+                adjusted["amount"] = 0
+                adjusted["reason"] = f"{action['reason']} 但尚未满足量化减仓触发条件。"
+                adjusted["execution"] = "减仓观察：等待反弹减仓触发（当日涨幅 >= 1.5% 且主力净流入 >= 0）或风控减仓触发后再执行。"
         elif confirmation["status"] == "supportive":
-            adjusted_amount = original * 0.75
-            adjusted["execution"] = f"{action['execution']} 资金流仍有支撑，减仓金额下调，避免卖在短线修复期。"
+            if _has_rebound_trim_trigger(confirmation):
+                adjusted_amount = original * 0.75
+                adjusted["execution"] = "反弹减仓触发：当日涨幅 >= 1.5% 且主力净流入 >= 0；资金流仍有支撑，减仓金额按原建议的 75% 控制。"
+            else:
+                adjusted["type"] = "trim_watch"
+                adjusted["amount"] = 0
+                adjusted["reason"] = f"{action['reason']} 但资金流仍有支撑，未满足反弹减仓触发条件。"
+                adjusted["execution"] = "减仓观察：等待反弹减仓触发（当日涨幅 >= 1.5% 且主力净流入 >= 0）后再执行，避免卖在短线修复前。"
+        else:
+            adjusted["execution"] = "中性减仓：资产桶超配且资金流无明确支撑/恶化，按慢调仓金额执行。"
 
-    if action["type"] in ("add", "trim"):
+    if action["type"] in ("add", "trim") and adjusted["type"] not in ("add_watch", "trim_watch"):
         adjusted["amount"] = round(max(0, adjusted_amount), -2)
     adjusted["raw_amount"] = round(original, 2)
     adjusted["market_confirmation"] = confirmation
@@ -730,16 +984,17 @@ def _fund_recommendations(snapshot: PortfolioSnapshot, actions: List[Dict], db: 
         market_confirmation = (
             bucket_action.get("market_confirmation")
             if bucket_action and holding.bucket == "a_share_core"
-            else _sector_confirmation_for_fund(holding.name, holding.bucket, db)
+            else _sector_confirmation_for_fund(holding.name, holding.bucket, db, holding.flow_sector_name)
         )
         profit_amount = holding.profit_amount if holding.profit_amount is not None else KNOWN_PROFITS.get(holding.name, {}).get("profit_amount")
         profit_rate = holding.profit_rate if holding.profit_rate is not None else KNOWN_PROFITS.get(holding.name, {}).get("profit_rate")
         profit_mod = _profit_modifier(profit_amount, profit_rate, base_type)
         final_amount = base_amount
         if base_amount > 0 and base_type != "clear_watch":
+            confirmation_factor = 0.0 if market_confirmation.get("operation_permission") == "manual_confirm" else (market_confirmation.get("factor", 0.0) or 0.0)
             final_amount = max(0.0, min(
                 INTRADAY_MAX_ACTION,
-                base_amount * (1 + modifier["factor"] + profit_mod["factor"] + (market_confirmation.get("factor", 0.0) or 0.0)),
+                base_amount * (1 + modifier["factor"] + profit_mod["factor"] + confirmation_factor),
             ))
         if modifier["factor"] < 0 and base_type.startswith("intraday_add"):
             final_amount = min(final_amount, 1000.0)
@@ -757,6 +1012,7 @@ def _fund_recommendations(snapshot: PortfolioSnapshot, actions: List[Dict], db: 
             "amount": round(holding.amount, 2),
             "profit_amount": profit_amount,
             "profit_rate": profit_rate,
+            "flow_sector_name": holding.flow_sector_name,
             "recommendation": base_type,
             "recommendation_label": {
                 "hold": "持有观察",
@@ -811,7 +1067,7 @@ def _recommend(snapshot: PortfolioSnapshot, db: Session) -> Dict:
                 "amount": round(max(1000, amount), -2),
                 "priority": 2 if bucket == "commodities" else 3,
                 "reason": f"{row['name']} 当前 {row['pct'] * 100:.1f}%，高于目标 {row['target'] * 100:.0f}%。",
-                "execution": "不追着杀跌；优先在反弹日或信号转弱日减仓。",
+                "execution": "不追着杀跌；仅在反弹减仓触发（当日涨幅 >= 1.5% 且主力净流入 >= 0）或风控减仓触发后执行。",
             })
 
     gold = row_map["gold"]
@@ -902,6 +1158,17 @@ def _recommend(snapshot: PortfolioSnapshot, db: Session) -> Dict:
     }
 
 
+def _sector_options(db: Session) -> List[str]:
+    rows = (
+        db.query(SectorFundFlow.sector_name)
+        .filter(SectorFundFlow.sector_type == "industry")
+        .distinct()
+        .order_by(SectorFundFlow.sector_name)
+        .all()
+    )
+    return [row[0] for row in rows if row[0]]
+
+
 def _build_review_prompt(recommendation: Dict) -> str:
     compact = {
         "total_assets": recommendation["total_assets"],
@@ -924,7 +1191,9 @@ def _build_review_prompt(recommendation: Dict) -> str:
 @router.get("/latest")
 def latest_snapshot(db: Session = Depends(get_db)):
     snapshot = _ensure_snapshot(db)
-    return _recommend(snapshot, db)
+    result = _recommend(snapshot, db)
+    result["sector_options"] = _sector_options(db)
+    return result
 
 
 @router.post("/snapshots")
@@ -955,6 +1224,7 @@ def save_snapshot(payload: SnapshotIn, db: Session = Depends(get_db)):
             profit_amount=h.profit_amount if h.profit_amount is not None else KNOWN_PROFITS.get(h.name, {}).get("profit_amount"),
             profit_rate=h.profit_rate if h.profit_rate is not None else KNOWN_PROFITS.get(h.name, {}).get("profit_rate"),
             bucket=h.bucket,
+            flow_sector_name=_normalise_sector_name(h.flow_sector_name),
             note=h.note,
         )
         for h in payload.holdings
@@ -962,7 +1232,9 @@ def save_snapshot(payload: SnapshotIn, db: Session = Depends(get_db)):
 
     db.commit()
     db.refresh(snapshot)
-    return _recommend(snapshot, db)
+    result = _recommend(snapshot, db)
+    result["sector_options"] = _sector_options(db)
+    return result
 
 
 @router.get("/snapshots")
