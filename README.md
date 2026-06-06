@@ -150,3 +150,14 @@ vestoria-data-terminal/
 ├── start.sh / stop.sh
 └── CONTEXT.md               # 领域术语与设计决策文档
 ```
+
+---
+
+## 支持项目
+
+如果这个项目对你有帮助，可以请作者喝杯咖啡。
+
+<p>
+  <img src="./打赏.jpg" alt="打赏二维码 1" width="260" />
+  <img src="./打赏2.png" alt="打赏二维码 2" width="260" />
+</p>
