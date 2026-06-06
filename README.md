@@ -50,6 +50,26 @@ A 股行业与概念板块的资金流动追踪：
 
 ---
 
+## 功能演示
+
+### 组合配置中枢
+
+![组合配置中枢](./docs/images/readme/portfolio-center.png)
+
+### 板块资金流
+
+![板块资金流](./docs/images/readme/sector-flow.png)
+
+### 大资金动向
+
+![大资金动向](./docs/images/readme/big-money.png)
+
+### 当前持仓回测
+
+![当前持仓回测](./docs/images/readme/backtest.png)
+
+---
+
 ## 快速启动
 
 ### Docker（推荐）
