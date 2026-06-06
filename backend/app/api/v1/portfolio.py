@@ -29,6 +29,11 @@ _estimate_cache: Dict[str, Dict] = {}
 
 GOLD_ASSET_ID = "GC=F"
 DOLLAR_INDEX_ASSET_ID = "DX-Y.NYB"
+DOLLAR_CONFIRMATION_ASSETS = [
+    {"asset_id": "DX-Y.NYB", "label": "美元指数现货", "quality": "complete"},
+    {"asset_id": "DX=F", "label": "美元指数期货", "quality": "fallback"},
+    {"asset_id": "UUP", "label": "美元指数ETF代理", "quality": "proxy"},
+]
 
 
 TARGET_BUCKETS = {
@@ -466,9 +471,27 @@ def _price_history(db: Session, asset_id: str, limit: int = 60) -> List[PriceDat
     return list(reversed(rows))
 
 
+def _select_dollar_history(db: Session, limit: int = 20) -> Dict[str, Any]:
+    candidates = []
+    for item in DOLLAR_CONFIRMATION_ASSETS:
+        rows = _price_history(db, item["asset_id"], limit)
+        candidate = {**item, "rows": rows, "days": len(rows)}
+        candidates.append(candidate)
+        if len(rows) >= 6:
+            return candidate
+    return candidates[0] if candidates else {
+        "asset_id": DOLLAR_INDEX_ASSET_ID,
+        "label": "美元指数现货",
+        "quality": "missing",
+        "rows": [],
+        "days": 0,
+    }
+
+
 def _gold_macro_confirmation(db: Session) -> Dict[str, Any]:
     gold_rows = _price_history(db, GOLD_ASSET_ID, 40)
-    dollar_rows = _price_history(db, DOLLAR_INDEX_ASSET_ID, 20)
+    dollar_candidate = _select_dollar_history(db, 20)
+    dollar_rows = dollar_candidate["rows"]
     base = {
         "factor": 0.0,
         "operation_permission": "manual_confirm",
@@ -484,7 +507,9 @@ def _gold_macro_confirmation(db: Session) -> Dict[str, Any]:
             "summary": "黄金仓位占比较高，当前缺少至少20个交易日金价数据；禁止自动加仓，只能人工确认。",
             "evidence": {
                 "gold_asset_id": GOLD_ASSET_ID,
-                "dollar_asset_id": DOLLAR_INDEX_ASSET_ID,
+                "dollar_asset_id": dollar_candidate["asset_id"],
+                "dollar_source_label": dollar_candidate["label"],
+                "dollar_data_quality": "missing" if len(dollar_rows) < 6 else dollar_candidate["quality"],
                 "gold_days": len(gold_rows),
                 "dollar_days": len(dollar_rows),
             },
@@ -501,7 +526,9 @@ def _gold_macro_confirmation(db: Session) -> Dict[str, Any]:
 
     evidence = {
         "gold_asset_id": GOLD_ASSET_ID,
-        "dollar_asset_id": DOLLAR_INDEX_ASSET_ID,
+        "dollar_asset_id": dollar_candidate["asset_id"],
+        "dollar_source_label": dollar_candidate["label"],
+        "dollar_data_quality": "missing" if len(dollar_rows) < 6 else dollar_candidate["quality"],
         "gold_date": latest_gold.date.isoformat(),
         "gold_close": round(latest_gold.close, 4),
         "gold_ma20": round(ma20, 4),
@@ -517,7 +544,7 @@ def _gold_macro_confirmation(db: Session) -> Dict[str, Any]:
             "status": "neutral",
             "label": "黄金宏观信号不完整",
             "date": latest_gold.date.isoformat(),
-            "summary": "已接入金价20日均线偏离度，但美元指数缺失或样本不足；黄金操作权限保持人工确认，不自动加仓。",
+            "summary": "已接入金价20日均线偏离度，但美元指数、美元指数期货和UUP代理均缺失或样本不足；黄金操作权限保持人工确认，不自动加仓。",
             "evidence": evidence,
         }
 

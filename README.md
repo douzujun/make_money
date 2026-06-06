@@ -92,14 +92,16 @@ cd .. && ./start.sh
 
 - `GC=F`：COMEX Gold Futures，用于黄金 20 日均线偏离度
 - `DX-Y.NYB`：US Dollar Index，用于美元指数趋势确认
+- `DX=F`：美元指数期货，作为 `DX-Y.NYB` 限流或缺样本时的备用确认
+- `UUP`：美元指数 ETF 代理，作为前两者不可用时的兜底代理
 
 如果黄金宏观卡片显示「美元指数缺失」或「信号不完整」，先刷新价格数据：
 
 ```bash
-curl -X POST "http://localhost:8000/api/v1/prices/refresh?asset_ids=GC%3DF&asset_ids=DX-Y.NYB"
+curl -X POST "http://localhost:8000/api/v1/prices/refresh?asset_ids=GC%3DF&asset_ids=DX-Y.NYB&asset_ids=DX%3DF&asset_ids=UUP"
 ```
 
-也可以在自选列表/价格刷新入口手动刷新这两个资产。宏观数据未齐全前，黄金建议会保持「人工确认」，不会自动放大加仓金额。
+也可以在自选列表/价格刷新入口手动刷新这些资产。宏观数据未齐全前，黄金建议会保持「人工确认」，不会自动放大加仓金额。
 
 ---
 

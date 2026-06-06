@@ -790,9 +790,9 @@ function MarketConfirmationPanel({ confirmations }: { confirmations: Recommendat
             {bucket === 'gold' && (
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 6, marginTop: 10, fontSize: 11 }}>
                 <span style={{ color: 'var(--text-muted)' }}>金价MA20偏离 {formatSignedPct(ev.gold_ma20_deviation_pct)}</span>
-                <span style={{ color: 'var(--text-muted)' }}>美元5日趋势 {formatSignedPct(ev.dollar_trend_5d_pct)}</span>
+                <span style={{ color: 'var(--text-muted)' }}>{ev.dollar_source_label || '美元指数'}5日趋势 {formatSignedPct(ev.dollar_trend_5d_pct)}</span>
                 <span style={{ color: 'var(--text-muted)' }}>金价 {ev.gold_close ? Number(ev.gold_close).toFixed(2) : '—'}</span>
-                <span style={{ color: '#d97706', fontWeight: 800 }}>{item.permission_label || '人工确认'}</span>
+                <span style={{ color: '#d97706', fontWeight: 800 }}>{item.permission_label || '人工确认'} · {ev.dollar_data_quality || 'missing'}</span>
               </div>
             )}
             {topSectors.length > 0 && (
