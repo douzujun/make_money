@@ -435,6 +435,78 @@ class PortfolioMarketConfirmationsTest(unittest.TestCase):
         finally:
             session.close()
 
+    def test_gold_above_target_blocks_add_even_when_macro_supportive(self):
+        session, snapshot = self.make_snapshot([
+            {"name": "国泰黄金ETF联接A", "amount": 120000, "bucket": "gold"},
+            {"name": "现金替代测试", "amount": 190000, "bucket": "fragments"},
+        ])
+        try:
+            self.add_asset_prices(session, "GC=F", [100 + idx for idx in range(25)], "Gold Futures")
+            self.add_asset_prices(session, "DX-Y.NYB", [110 - idx * 0.2 for idx in range(25)], "US Dollar Index")
+
+            result = portfolio._recommend(snapshot, session)
+            gold_actions = [a for a in result["actions"] if a["bucket"] == "gold"]
+
+            self.assertTrue(gold_actions)
+            self.assertTrue(all(a["type"] != "add" for a in gold_actions))
+            self.assertIn("不再主动加仓", gold_actions[0]["execution"])
+        finally:
+            session.close()
+
+    def test_gold_warning_zone_trims_on_rebound_and_macro_weakness(self):
+        session, snapshot = self.make_snapshot([
+            {"name": "国泰黄金ETF联接A", "amount": 145000, "bucket": "gold"},
+            {"name": "现金替代测试", "amount": 200000, "bucket": "fragments"},
+        ])
+        try:
+            self.add_asset_prices(session, "GC=F", [100] * 20 + [104, 105, 106, 107, 108], "Gold Futures")
+            self.add_asset_prices(session, "DX-Y.NYB", [100 + idx * 0.2 for idx in range(25)], "US Dollar Index")
+
+            result = portfolio._recommend(snapshot, session)
+            gold_action = next(a for a in result["actions"] if a["bucket"] == "gold")
+
+            self.assertEqual("trim", gold_action["type"])
+            self.assertGreater(gold_action["amount"], 0)
+            self.assertLessEqual(gold_action["amount"], 5000)
+            self.assertIn("警戒上限", gold_action["reason"])
+        finally:
+            session.close()
+
+    def test_gold_underweight_adds_only_with_macro_confirmation(self):
+        session, snapshot = self.make_snapshot([
+            {"name": "国泰黄金ETF联接A", "amount": 70000, "bucket": "gold"},
+            {"name": "现金替代测试", "amount": 300000, "bucket": "fragments"},
+        ])
+        try:
+            self.add_asset_prices(session, "GC=F", [100 + idx for idx in range(25)], "Gold Futures")
+            self.add_asset_prices(session, "DX-Y.NYB", [110 - idx * 0.2 for idx in range(25)], "US Dollar Index")
+
+            result = portfolio._recommend(snapshot, session)
+            gold_action = next(a for a in result["actions"] if a["bucket"] == "gold")
+
+            self.assertEqual("add", gold_action["type"])
+            self.assertLessEqual(gold_action["amount"], 3000)
+            self.assertIn("低于18%", gold_action["reason"])
+        finally:
+            session.close()
+
+    def test_gold_underweight_without_macro_confirmation_stays_watch(self):
+        session, snapshot = self.make_snapshot([
+            {"name": "国泰黄金ETF联接A", "amount": 70000, "bucket": "gold"},
+            {"name": "现金替代测试", "amount": 300000, "bucket": "fragments"},
+        ])
+        try:
+            self.add_asset_prices(session, "GC=F", [100 + idx for idx in range(25)], "Gold Futures")
+
+            result = portfolio._recommend(snapshot, session)
+            gold_action = next(a for a in result["actions"] if a["bucket"] == "gold")
+
+            self.assertEqual("add_watch", gold_action["type"])
+            self.assertEqual(0, gold_action["amount"])
+            self.assertIn("宏观未确认", gold_action["execution"])
+        finally:
+            session.close()
+
 
 if __name__ == "__main__":
     unittest.main()

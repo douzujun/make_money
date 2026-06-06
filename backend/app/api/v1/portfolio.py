@@ -34,6 +34,11 @@ DOLLAR_CONFIRMATION_ASSETS = [
     {"asset_id": "DX=F", "label": "美元指数期货", "quality": "fallback"},
     {"asset_id": "UUP", "label": "美元指数ETF代理", "quality": "proxy"},
 ]
+GOLD_LOW_WATCH_PCT = 0.18
+GOLD_TARGET_LOW_PCT = 0.20
+GOLD_TARGET_HIGH_PCT = 0.25
+GOLD_WARNING_PCT = 0.28
+GOLD_HARD_CAP_PCT = 0.30
 
 
 TARGET_BUCKETS = {
@@ -587,6 +592,124 @@ def _gold_macro_confirmation(db: Session) -> Dict[str, Any]:
     }
 
 
+def _gold_rebound_trim_trigger(confirmation: Dict[str, Any]) -> bool:
+    ev = confirmation.get("evidence") or {}
+    gold_dev = ev.get("gold_ma20_deviation_pct")
+    dollar_trend = ev.get("dollar_trend_5d_pct")
+    gold_trend = ev.get("gold_trend_5d_pct")
+    return (
+        gold_dev is not None
+        and dollar_trend is not None
+        and gold_dev >= 3.0
+        and dollar_trend >= 0.5
+        and (gold_trend is None or gold_trend >= 0)
+    )
+
+
+def _gold_position_action(
+    row: Dict[str, Any],
+    total_assets: float,
+    daily_add_cap: float,
+    daily_trim_cap: float,
+    confirmation: Dict[str, Any],
+) -> Dict[str, Any]:
+    pct = row["pct"]
+    target_amount = total_assets * GOLD_TARGET_HIGH_PCT
+    excess_to_target = max(0.0, row["amount"] - target_amount)
+    low_gap = max(0.0, total_assets * GOLD_TARGET_LOW_PCT - row["amount"])
+    supportive = confirmation.get("status") == "supportive"
+    caution = confirmation.get("status") == "caution"
+    rebound_trim = _gold_rebound_trim_trigger(confirmation)
+
+    if pct > GOLD_HARD_CAP_PCT:
+        amount = min(daily_trim_cap, max(1000.0, excess_to_target * 0.50), 5000.0)
+        return {
+            "type": "trim",
+            "bucket": "gold",
+            "target_name": "黄金防守仓",
+            "amount": round(amount, -2),
+            "priority": 2,
+            "reason": f"黄金当前 {pct * 100:.1f}%，超过30%硬上限，只讨论分批降仓。",
+            "execution": "硬风控减仓：不看多加仓；优先把黄金仓位分批降回25%附近，单日不超过5000元。",
+        }
+
+    if pct >= GOLD_WARNING_PCT:
+        if caution or rebound_trim:
+            amount = min(daily_trim_cap, max(1000.0, excess_to_target * 0.35), 5000.0)
+            return {
+                "type": "trim",
+                "bucket": "gold",
+                "target_name": "黄金防守仓",
+                "amount": round(amount, -2),
+                "priority": 3,
+                "reason": f"黄金当前 {pct * 100:.1f}%，高于28%警戒上限，且宏观/反弹窗口允许风控减仓。",
+                "execution": "警戒减仓：只在反弹或宏观转弱时小额执行，避免单日大跌时杀跌。",
+            }
+        return {
+            "type": "trim_watch",
+            "bucket": "gold",
+            "target_name": "黄金防守仓",
+            "amount": 0,
+            "priority": 3,
+            "reason": f"黄金当前 {pct * 100:.1f}%，高于28%警戒上限，但尚未出现量化减仓窗口。",
+            "execution": "减仓观察：等待金价反弹且美元转强，或宏观信号转弱后再分批降仓；不杀跌。",
+        }
+
+    if pct >= GOLD_TARGET_HIGH_PCT:
+        if caution or rebound_trim:
+            amount = min(daily_trim_cap, max(1000.0, excess_to_target * 0.25), 3000.0)
+            return {
+                "type": "trim",
+                "bucket": "gold",
+                "target_name": "黄金防守仓",
+                "amount": round(amount, -2),
+                "priority": 4,
+                "reason": f"黄金当前 {pct * 100:.1f}%，高于25%目标上沿，且出现减仓观察触发。",
+                "execution": "小额减仓：只在反弹窗口或宏观转弱时执行，单日不超过3000元。",
+            }
+        return {
+            "type": "hold",
+            "bucket": "gold",
+            "target_name": "黄金防守仓",
+            "amount": 0,
+            "priority": 4,
+            "reason": f"黄金当前 {pct * 100:.1f}%，高于25%目标上沿。",
+            "execution": "不再主动加仓；以持有和人工确认为主，等待仓位回到20%-25%区间或出现减仓窗口。",
+        }
+
+    if pct < GOLD_LOW_WATCH_PCT:
+        if supportive and daily_add_cap > 0:
+            amount = min(daily_add_cap, max(1000.0, low_gap * 0.25), 3000.0)
+            return {
+                "type": "add",
+                "bucket": "gold",
+                "target_name": "黄金防守仓",
+                "amount": round(amount, -2),
+                "priority": 4,
+                "reason": f"黄金当前 {pct * 100:.1f}%，低于18%低配观察线，且金价/美元形成双确认。",
+                "execution": "小额加仓观察：只补低配缺口的20%-25%，单日不超过3000元，仍需人工确认。",
+            }
+        return {
+            "type": "add_watch",
+            "bucket": "gold",
+            "target_name": "黄金防守仓",
+            "amount": 0,
+            "priority": 4,
+            "reason": f"黄金当前 {pct * 100:.1f}%，低于18%低配观察线。",
+            "execution": "宏观未确认，不补仓；等待金价趋势和美元趋势至少双确认后再小额执行。",
+        }
+
+    return {
+        "type": "hold",
+        "bucket": "gold",
+        "target_name": "黄金防守仓",
+        "amount": 0,
+        "priority": 4,
+        "reason": f"黄金当前 {pct * 100:.1f}%，处于20%-25%目标管理区附近。",
+        "execution": "持有为主；黄金模块服务仓位上限/下限管理，不做短线预测。",
+    }
+
+
 def _normalise_sector_name(sector_name: Optional[str]) -> Optional[str]:
     if not sector_name:
         return None
@@ -931,6 +1054,11 @@ def _bucket_market_confirmations(snapshot: PortfolioSnapshot, db: Session) -> Di
 def _apply_market_to_action(action: Dict, confirmation: Optional[Dict[str, Any]]) -> Dict:
     if not confirmation:
         return action
+    if action.get("bucket") == "gold":
+        adjusted = dict(action)
+        adjusted["raw_amount"] = round(float(action["amount"]), 2)
+        adjusted["market_confirmation"] = confirmation
+        return adjusted
     adjusted = dict(action)
     factor = confirmation.get("factor", 0.0) or 0.0
     original = float(action["amount"])
@@ -1067,6 +1195,7 @@ def _recommend(snapshot: PortfolioSnapshot, db: Session) -> Dict:
     daily_add_cap = min(cash_budget, 20000.0)
     daily_trim_cap = min(total_assets * 0.02, 8000.0)
     slow_factor = 0.25
+    market_confirmations = _bucket_market_confirmations(snapshot, db)
 
     actions = []
 
@@ -1098,16 +1227,13 @@ def _recommend(snapshot: PortfolioSnapshot, db: Session) -> Dict:
             })
 
     gold = row_map["gold"]
-    if gold["pct"] >= gold["target"] - 0.01:
-        actions.append({
-            "type": "hold",
-            "bucket": "gold",
-            "target_name": "黄金防守仓",
-            "amount": 0,
-            "priority": 4,
-            "reason": f"黄金当前 {gold['pct'] * 100:.1f}%，接近 25% 防守仓目标。",
-            "execution": "暂停主动加仓；只在宏观信号显著增强或组合风险升高时重新评估。",
-        })
+    actions.append(_gold_position_action(
+        gold,
+        total_assets,
+        daily_add_cap,
+        daily_trim_cap,
+        market_confirmations.get("gold", {}),
+    ))
 
     fragment_holdings = [
         h for h in snapshot.holdings
@@ -1134,7 +1260,6 @@ def _recommend(snapshot: PortfolioSnapshot, db: Session) -> Dict:
             "execution": "可在下一次手动整理持仓时执行，避免过多小仓位分散注意力。",
         })
 
-    market_confirmations = _bucket_market_confirmations(snapshot, db)
     actions = [
         _apply_market_to_action(action, market_confirmations.get(action["bucket"]))
         for action in actions
