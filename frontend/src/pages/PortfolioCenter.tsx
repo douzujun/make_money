@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   ArrowDownRight, ArrowUpRight, BadgeInfo, CheckCircle2, Coins, Gauge,
@@ -13,6 +13,9 @@ const PORTFOLIO_PROFIT_BOOK_KEY = 'portfolio-center-profit-book-v1';
 const PORTFOLIO_SECTOR_BOOK_KEY = 'portfolio-center-flow-sector-book-v1';
 const PORTFOLIO_BACKTEST_A_KEY = 'portfolio-center-backtest-a-v1';
 const PORTFOLIO_CLAUDE_REVIEW_KEY = 'portfolio-center-claude-review-v1';
+const LOCAL_STORAGE_MAX_CHARS = 300_000;
+const REVIEW_STORAGE_MAX_CHARS = 500_000;
+const INITIAL_LOAD_TIMEOUT_MS = 15_000;
 
 type BucketId =
   | 'a_share_core'
@@ -293,13 +296,47 @@ function todayIso() {
   return new Date().toISOString().slice(0, 10);
 }
 
-function loadDraft(): Snapshot | null {
+function readLocalJson<T>(key: string, fallback: T, maxChars = LOCAL_STORAGE_MAX_CHARS): T {
   try {
-    const raw = localStorage.getItem(PORTFOLIO_DRAFT_KEY);
-    return raw ? JSON.parse(raw) : null;
+    const raw = localStorage.getItem(key);
+    if (!raw) return fallback;
+    if (raw.length > maxChars) {
+      localStorage.removeItem(key);
+      return fallback;
+    }
+    return JSON.parse(raw) as T;
   } catch {
+    localStorage.removeItem(key);
+    return fallback;
+  }
+}
+
+function isSnapshot(value: unknown): value is Snapshot {
+  if (!value || typeof value !== 'object') return false;
+  const snapshot = value as Partial<Snapshot>;
+  return (
+    typeof snapshot.snapshot_date === 'string' &&
+    typeof snapshot.money_fund_amount === 'number' &&
+    typeof snapshot.cash_amount === 'number' &&
+    typeof snapshot.usable_cash_amount === 'number' &&
+    Array.isArray(snapshot.holdings)
+  );
+}
+
+function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = INITIAL_LOAD_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { ...options, signal: controller.signal }).finally(() => window.clearTimeout(timeoutId));
+}
+
+function loadDraft(): Snapshot | null {
+  const draft = readLocalJson<unknown>(PORTFOLIO_DRAFT_KEY, null);
+  if (!draft) return null;
+  if (!isSnapshot(draft)) {
+    localStorage.removeItem(PORTFOLIO_DRAFT_KEY);
     return null;
   }
+  return draft;
 }
 
 function saveDraft(snapshot: Snapshot) {
@@ -307,12 +344,7 @@ function saveDraft(snapshot: Snapshot) {
 }
 
 function loadCodeBook(): Record<string, string> {
-  try {
-    const raw = localStorage.getItem(PORTFOLIO_CODE_BOOK_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
+  return readLocalJson<Record<string, string>>(PORTFOLIO_CODE_BOOK_KEY, {});
 }
 
 function saveCodeBook(holdings: Holding[]) {
@@ -337,12 +369,7 @@ function applyCodeBook(snapshot: Snapshot): Snapshot {
 }
 
 function loadProfitBook(): Record<string, { profit_amount?: number | null; profit_rate?: number | null }> {
-  try {
-    const raw = localStorage.getItem(PORTFOLIO_PROFIT_BOOK_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
+  return readLocalJson<Record<string, { profit_amount?: number | null; profit_rate?: number | null }>>(PORTFOLIO_PROFIT_BOOK_KEY, {});
 }
 
 function saveProfitBook(holdings: Holding[]) {
@@ -373,12 +400,7 @@ function applyProfitBook(snapshot: Snapshot): Snapshot {
 }
 
 function loadSectorBook(): Record<string, string> {
-  try {
-    const raw = localStorage.getItem(PORTFOLIO_SECTOR_BOOK_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
+  return readLocalJson<Record<string, string>>(PORTFOLIO_SECTOR_BOOK_KEY, {});
 }
 
 function saveSectorBook(holdings: Holding[]) {
@@ -451,16 +473,21 @@ function saveBacktestProxy(snapshot: Snapshot) {
 }
 
 function loadClaudeReviewPayload(): ClaudeReviewPayload | null {
-  try {
-    const raw = localStorage.getItem(PORTFOLIO_CLAUDE_REVIEW_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
+  return readLocalJson<ClaudeReviewPayload | null>(PORTFOLIO_CLAUDE_REVIEW_KEY, null, REVIEW_STORAGE_MAX_CHARS);
 }
 
 function saveClaudeReviewPayload(payload: ClaudeReviewPayload) {
   localStorage.setItem(PORTFOLIO_CLAUDE_REVIEW_KEY, JSON.stringify(payload));
+}
+
+function clearPortfolioLocalState() {
+  [
+    PORTFOLIO_DRAFT_KEY,
+    PORTFOLIO_CODE_BOOK_KEY,
+    PORTFOLIO_PROFIT_BOOK_KEY,
+    PORTFOLIO_SECTOR_BOOK_KEY,
+    PORTFOLIO_CLAUDE_REVIEW_KEY,
+  ].forEach(key => localStorage.removeItem(key));
 }
 
 function Card({
@@ -1143,12 +1170,13 @@ export default function PortfolioCenter() {
   const [savingClaudeConfig, setSavingClaudeConfig] = useState(false);
   const [error, setError] = useState('');
   const [savedText, setSavedText] = useState('');
+  const initialLoadStarted = useRef(false);
 
   const loadLatest = async () => {
     setLoading(true);
     setError('');
     try {
-      const res = await fetch(`${API}/portfolio/latest`);
+      const res = await fetchWithTimeout(`${API}/portfolio/latest`);
       if (!res.ok) throw new Error((await res.json()).detail ?? '加载持仓失败');
       const payload = await res.json();
       const draft = loadDraft();
@@ -1161,6 +1189,8 @@ export default function PortfolioCenter() {
       }
     } catch (e) {
       setError(String(e));
+      setData(null);
+      setSnapshot(null);
     } finally {
       setLoading(false);
     }
@@ -1168,7 +1198,7 @@ export default function PortfolioCenter() {
 
   const loadClaudeConfig = async () => {
     try {
-      const res = await fetch(`${API}/portfolio/claude-review/config`);
+      const res = await fetchWithTimeout(`${API}/portfolio/claude-review/config`, {}, 8_000);
       if (!res.ok) throw new Error((await res.json()).detail ?? '加载 Claude Code 配置失败');
       const payload = await res.json();
       setClaudeConfig(payload);
@@ -1179,6 +1209,8 @@ export default function PortfolioCenter() {
   };
 
   useEffect(() => {
+    if (initialLoadStarted.current) return;
+    initialLoadStarted.current = true;
     loadLatest();
     loadClaudeConfig();
   }, []);
@@ -1323,14 +1355,45 @@ export default function PortfolioCenter() {
 
   if (loading) {
     return (
-      <div style={{ padding: 80, textAlign: 'center', color: 'var(--text-muted)' }}>
-        <Loader2 size={24} style={{ animation: 'spin 1s linear infinite' }} /> 加载组合配置中枢...
+      <div style={{ padding: 80, textAlign: 'center', color: 'var(--text-muted)', display: 'grid', gap: 14, justifyItems: 'center' }}>
+        <Loader2 size={24} style={{ animation: 'spin 1s linear infinite' }} />
+        <div>加载组合配置中枢...</div>
+        <button
+          onClick={() => {
+            clearPortfolioLocalState();
+            window.location.reload();
+          }}
+          style={{ padding: '8px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', cursor: 'pointer', fontSize: 12, fontWeight: 700 }}
+        >
+          清除本地草稿并重试
+        </button>
       </div>
     );
   }
 
   if (!data || !snapshot) {
-    return <div style={{ color: '#dc2626' }}>{error || '暂无组合数据'}</div>;
+    return (
+      <div style={{ padding: 48, display: 'grid', gap: 14, color: 'var(--text-primary)' }}>
+        <div style={{ color: '#dc2626', fontSize: 14, fontWeight: 750 }}>{error || '暂无组合数据'}</div>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <button
+            onClick={loadLatest}
+            style={{ padding: '8px 12px', borderRadius: 8, border: '1px solid #6366f144', background: '#6366f114', color: '#4f46e5', cursor: 'pointer', fontSize: 12, fontWeight: 750 }}
+          >
+            重新加载
+          </button>
+          <button
+            onClick={() => {
+              clearPortfolioLocalState();
+              window.location.reload();
+            }}
+            style={{ padding: '8px 12px', borderRadius: 8, border: '1px solid #dc262633', background: '#dc262612', color: '#dc2626', cursor: 'pointer', fontSize: 12, fontWeight: 750 }}
+          >
+            清除本地草稿并重试
+          </button>
+        </div>
+      </div>
+    );
   }
 
   const rows = data.bucket_rows;

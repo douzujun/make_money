@@ -11,4 +11,4 @@ osascript -e "tell app \"Terminal\" to do script \"cd '$ROOT/frontend' && npm ru
 
 sleep 3
 echo "已启动，正在打开浏览器..."
-open http://localhost:5173
+open "http://localhost:5173/portfolio-center?ts=$(date +%s)"

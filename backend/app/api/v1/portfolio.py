@@ -29,10 +29,12 @@ LOCAL_SETTINGS_PATH = Path(__file__).resolve().parents[3] / "data" / "local_sett
 INTRADAY_MAX_ACTION = 3000.0
 INTRADAY_TIMEOUT = 4
 ESTIMATE_CACHE_TTL = 180
+PORTFOLIO_LATEST_CACHE_TTL = 30
 MAX_REVIEW_ACTIONS = 10
 MAX_REVIEW_FUNDS = 20
 MAX_REVIEW_SECTORS = 20
 _estimate_cache: Dict[str, Dict] = {}
+_latest_cache: Dict[str, Any] = {"payload": None, "expires_at": 0.0}
 
 GOLD_ASSET_ID = "GC=F"
 DOLLAR_INDEX_ASSET_ID = "DTWEXBGS"
@@ -1728,9 +1730,14 @@ def _parse_review_result(raw: str, evidence: Dict) -> Dict[str, Any]:
 
 @router.get("/latest")
 def latest_snapshot(db: Session = Depends(get_db)):
+    now = time.time()
+    if _latest_cache["payload"] is not None and now < _latest_cache["expires_at"]:
+        return _latest_cache["payload"]
     snapshot = _ensure_snapshot(db)
     result = _recommend(snapshot, db)
     result["sector_options"] = _sector_options(db)
+    _latest_cache["payload"] = result
+    _latest_cache["expires_at"] = now + PORTFOLIO_LATEST_CACHE_TTL
     return result
 
 
@@ -1770,6 +1777,8 @@ def save_snapshot(payload: SnapshotIn, db: Session = Depends(get_db)):
 
     db.commit()
     db.refresh(snapshot)
+    _latest_cache["payload"] = None
+    _latest_cache["expires_at"] = 0.0
     result = _recommend(snapshot, db)
     result["sector_options"] = _sector_options(db)
     return result
