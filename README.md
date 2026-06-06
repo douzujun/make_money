@@ -124,6 +124,8 @@ curl -X POST "http://localhost:8000/api/v1/prices/refresh?asset_ids=GC%3DF&asset
 
 也可以在自选列表/价格刷新入口手动刷新这些资产。宏观数据未齐全前，黄金建议会保持「人工确认」，不会自动放大加仓金额。
 
+如果刷新结果仍是 `0/3` 或日志出现 `Too Many Requests`，说明 Yahoo Finance 当前限流；稍后重试或配置 `PROXY_URL` 后再刷新。系统会优先使用资产的 `source_symbol` 拉取 Yahoo 代码，避免 `DX-Y.NYB` 被误拉成 `DXY`。
+
 ---
 
 ## 技术栈

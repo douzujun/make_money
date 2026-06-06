@@ -237,9 +237,12 @@ def get_yfinance_symbol(asset: Asset) -> str:
     """
     Get Yahoo Finance symbol for an asset.
     
-    For crypto: use ID (e.g., BTC-USD)
-    For stocks/ETF: use symbol (e.g., SPY)
+    Prefer source_symbol because some Yahoo tickers differ from display symbols
+    (for example DX-Y.NYB vs DXY). Fall back to ID for crypto and symbol for
+    regular stocks/ETFs.
     """
+    if asset.source_symbol:
+        return asset.source_symbol
     if asset.asset_type == "crypto":
         return asset.id  # e.g., BTC-USD, ETH-USD
     return asset.symbol  # e.g., SPY, AAPL
