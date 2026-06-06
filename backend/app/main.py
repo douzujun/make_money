@@ -11,7 +11,6 @@ from app.api import api_router
 from app.services.scheduler import get_data_scheduler
 from app.models.asset import Asset
 from app.models.indicator import Indicator, IndicatorTemplate
-from app.models.admin import Admin
 from app.models.big_money import NorthboundFlow, EtfShareRecord, BigMoneySignal  # noqa: F401
 from app.models.backtest import EtfPriceCache  # noqa: F401
 from app.models.portfolio import PortfolioSnapshot, PortfolioHolding  # noqa: F401
@@ -20,7 +19,6 @@ from app.indicators.cnn_fear_greed import init_cnn_fear_greed_targets
 from app.indicators.ma200 import init_ma200_targets
 from app.indicators.volatility_indices import init_volatility_targets
 from app.indicators.rsi import init_dashboard_targets
-from app.services.auth_service import AuthService
 
 # Import fetchers to register them
 import app.fetchers  # noqa: F401
@@ -69,6 +67,20 @@ def init_portfolio_macro_assets():
     db = SessionLocal()
     try:
         defaults = [
+            Asset(
+                id="DTWEXBGS",
+                symbol="DTWEXBGS",
+                name="Nominal Broad U.S. Dollar Index",
+                asset_type="index",
+                exchange="FRED",
+                country="US",
+                currency="USD",
+                data_source="fred",
+                source_symbol="DTWEXBGS",
+                is_active=True,
+                is_watched=True,
+                config={"fallback": "DBnomics FED/H10 JRXWTFB_N.B"},
+            ),
             Asset(
                 id="DX-Y.NYB",
                 symbol="DXY",
@@ -169,25 +181,8 @@ def init_indicators():
         db.close()
 
 
-def init_default_admin():
-    """Create default admin if missing."""
-    db = SessionLocal()
-    try:
-        admin = db.query(Admin).filter(Admin.username == "admin").first()
-        if not admin:
-            admin = Admin(
-                username="admin",
-                password_hash=AuthService.get_password_hash("admin123"),
-            )
-            db.add(admin)
-            db.commit()
-            logging.getLogger("main").info("Created default admin user: admin")
-    finally:
-        db.close()
-
 init_indicators()
 init_portfolio_macro_assets()
-init_default_admin()
 
 
 @asynccontextmanager

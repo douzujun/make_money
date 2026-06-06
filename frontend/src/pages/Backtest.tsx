@@ -521,13 +521,11 @@ export default function Backtest() {
   const hasData = Object.entries(priceStatus).some(([sym, v]) => sym !== 'CASH' && v.cached_rows > 0);
 
   const loadMeta = useCallback(async () => {
-    const token = localStorage.getItem('token');
-    const h = { Authorization: `Bearer ${token}` };
     const useCurrentPortfolio = new URLSearchParams(window.location.search).get('portfolioA') === 'current';
     const [a, p, s] = await Promise.all([
-      fetch(`${API}/backtest/assets`, { headers: h }).then(r => r.json()),
-      fetch(`${API}/backtest/presets`, { headers: h }).then(r => r.json()),
-      fetch(`${API}/backtest/price-status`, { headers: h }).then(r => r.json()),
+      fetch(`${API}/backtest/assets`).then(r => r.json()),
+      fetch(`${API}/backtest/presets`).then(r => r.json()),
+      fetch(`${API}/backtest/price-status`).then(r => r.json()),
     ]);
     setAssets(a.assets ?? []);
     setPresets(p.presets ?? []);
@@ -547,7 +545,7 @@ export default function Backtest() {
           nextLabel = `组合A已使用当前持仓代理${stored.snapshot_date ? `（${stored.snapshot_date}）` : ''}，组合B默认使用「你的目标框架」。`;
         } else {
           try {
-            const latest = await fetch(`${API}/portfolio/latest`, { headers: h }).then(r => r.json());
+            const latest = await fetch(`${API}/portfolio/latest`).then(r => r.json());
             if (latest?.snapshot) {
               nextA = { preset: null, weights: { ...EMPTY_WEIGHTS(), ...portfolioSnapshotToBacktestWeights(latest.snapshot) }, customMode: true };
               nextB = defaultConfig(p.presets, 'user_target');
@@ -571,17 +569,13 @@ export default function Backtest() {
 
   const handleFetchPrices = async () => {
     setFetching(true);
-    const token = localStorage.getItem('token');
     await fetch(`${API}/backtest/fetch-prices`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
     });
     let checks = 0;
     const poll = setInterval(async () => {
       checks++;
-      const s = await fetch(`${API}/backtest/price-status`, {
-        headers: { Authorization: `Bearer ${token}` },
-      }).then(r => r.json());
+      const s = await fetch(`${API}/backtest/price-status`).then(r => r.json());
       setPriceStatus(s);
       const done = Object.values(s as PriceStatus).every(v => v.cached_rows > 100);
       if (done || checks > 30) { clearInterval(poll); setFetching(false); }
@@ -592,7 +586,6 @@ export default function Backtest() {
     setError('');
     setRunning(true);
     try {
-      const token = localStorage.getItem('token');
       const body = {
         portfolio_a: { weights: configA.weights, label: portfolioALabel ? '当前持仓代理' : '组合A' },
         portfolio_b: enableB ? { weights: configB.weights, label: '组合B' } : null,
@@ -602,7 +595,7 @@ export default function Backtest() {
       };
       const res = await fetch(`${API}/backtest/run`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
       if (!res.ok) { setError((await res.json()).detail ?? '回测失败'); return; }

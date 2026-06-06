@@ -87,7 +87,7 @@ docker compose up -d --build
 ```bash
 # 后端
 cd backend && uv sync
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --port 8010
 
 # 前端
 cd frontend && npm install && npm run dev
@@ -119,7 +119,7 @@ cd .. && ./start.sh
 如果黄金宏观卡片显示「美元指数缺失」或「信号不完整」，先刷新价格数据：
 
 ```bash
-curl -X POST "http://localhost:8000/api/v1/prices/refresh?asset_ids=GC%3DF&asset_ids=DX-Y.NYB&asset_ids=DX%3DF&asset_ids=UUP"
+curl -X POST "http://localhost:8010/api/v1/prices/refresh?asset_ids=GC%3DF&asset_ids=DTWEXBGS&asset_ids=DX-Y.NYB&asset_ids=DX%3DF&asset_ids=UUP"
 ```
 
 也可以在自选列表/价格刷新入口手动刷新这些资产。宏观数据未齐全前，黄金建议会保持「人工确认」，不会自动放大加仓金额。

@@ -4,7 +4,7 @@ from datetime import datetime, date, timedelta
 from typing import List, Dict, Optional, Callable
 import threading
 
-from app.services.backfill import incremental_update, backfill_asset, get_yfinance_symbol
+from app.services.backfill import incremental_update_multi_source, update_asset_with_fetcher
 from app.core.database import SessionLocal
 from app.models.asset import Asset
 
@@ -59,7 +59,7 @@ class PriceUpdateScheduler:
         
         try:
             print(f"[{datetime.now()}] Starting price update...")
-            results = incremental_update(
+            results = incremental_update_multi_source(
                 asset_ids=asset_ids,
                 lookback_days=lookback_days
             )
@@ -139,16 +139,15 @@ def update_single_asset(asset_id: str, lookback_days: int = 30) -> Dict:
                 "message": "Asset not found"
             }
         
-        yf_symbol = get_yfinance_symbol(asset)
         end = date.today()
         start = end - timedelta(days=lookback_days)
-        
-        result = backfill_asset(
-            asset_id=asset.id,
-            symbol=yf_symbol,
+
+        result = update_asset_with_fetcher(
+            asset=asset,
             start=start,
             end=end,
-            db=db
+            db=db,
+            close_db=False,
         )
         
         return result

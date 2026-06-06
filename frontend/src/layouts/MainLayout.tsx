@@ -2,10 +2,9 @@ import { useState, useEffect } from 'react';
 import { Outlet, Link, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, Database, Activity, Star,
-  Bell, BarChart3, LogOut, LineChart, BarChart2, ChevronRight, Menu, X, TrendingUp, PieChart,
+  Bell, BarChart3, LineChart, BarChart2, ChevronRight, Menu, X, TrendingUp, PieChart,
   WalletCards,
 } from 'lucide-react';
-import { useAuthStore } from '@/stores/auth';
 
 const menuItems = [
   { path: '/',            label: '仪表盘',    icon: LayoutDashboard },
@@ -23,7 +22,6 @@ export default function MainLayout() {
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isMobile, setIsMobile] = useState(false);
-  const { logout } = useAuthStore();
 
   useEffect(() => {
     const check = () => {
@@ -136,23 +134,6 @@ export default function MainLayout() {
           })}
         </nav>
 
-        {/* Bottom — logout */}
-        <div style={{ padding: '12px', borderTop: '1px solid var(--border-color)', flexShrink: 0 }}>
-          <button
-            onClick={logout}
-            style={{
-              width: '100%', display: 'flex', alignItems: 'center', gap: 10,
-              padding: '9px 12px', borderRadius: 10,
-              border: '1px solid var(--border-color)', background: 'transparent',
-              cursor: 'pointer', fontSize: 13, color: 'var(--text-secondary)',
-              whiteSpace: 'nowrap',
-            }}
-            onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-secondary)'; }}
-            onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
-          >
-            <LogOut size={16} /> 退出登录
-          </button>
-        </div>
       </aside>
 
       {/* Mobile overlay */}

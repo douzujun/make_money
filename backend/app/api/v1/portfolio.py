@@ -28,9 +28,10 @@ ESTIMATE_CACHE_TTL = 180
 _estimate_cache: Dict[str, Dict] = {}
 
 GOLD_ASSET_ID = "GC=F"
-DOLLAR_INDEX_ASSET_ID = "DX-Y.NYB"
+DOLLAR_INDEX_ASSET_ID = "DTWEXBGS"
 DOLLAR_CONFIRMATION_ASSETS = [
-    {"asset_id": "DX-Y.NYB", "label": "美元指数现货", "quality": "complete"},
+    {"asset_id": "DTWEXBGS", "label": "FRED广义美元指数", "quality": "official_macro"},
+    {"asset_id": "DX-Y.NYB", "label": "美元指数现货", "quality": "fallback"},
     {"asset_id": "DX=F", "label": "美元指数期货", "quality": "fallback"},
     {"asset_id": "UUP", "label": "美元指数ETF代理", "quality": "proxy"},
 ]
@@ -549,7 +550,7 @@ def _gold_macro_confirmation(db: Session) -> Dict[str, Any]:
             "status": "neutral",
             "label": "黄金宏观信号不完整",
             "date": latest_gold.date.isoformat(),
-            "summary": "已接入金价20日均线偏离度，但美元指数、美元指数期货和UUP代理均缺失或样本不足；黄金操作权限保持人工确认，不自动加仓。",
+            "summary": "已接入金价20日均线偏离度，但FRED/DBnomics广义美元指数、DXY现货/期货和UUP代理均缺失或样本不足；黄金操作权限保持人工确认，不自动加仓。",
             "evidence": evidence,
         }
 

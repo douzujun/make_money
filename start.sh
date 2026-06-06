@@ -2,7 +2,7 @@
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 echo "启动后端..."
-osascript -e "tell app \"Terminal\" to do script \"cd '$ROOT/backend' && uv run uvicorn app.main:app --host 0.0.0.0 --port 8000\""
+osascript -e "tell app \"Terminal\" to do script \"cd '$ROOT/backend' && uv run uvicorn app.main:app --host 0.0.0.0 --port 8010\""
 
 sleep 1
 

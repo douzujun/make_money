@@ -9,8 +9,6 @@ from app.core.database import get_db
 from app.models.indicator import IndicatorTemplate, Indicator, IndicatorValue
 from app.models.asset import Asset
 from app.models.price_data import PriceData
-from app.models.admin import Admin
-from app.api.v1.auth import get_current_admin
 from app.schemas.indicator import (
     IndicatorTemplateCreate, IndicatorTemplateUpdate, IndicatorTemplateResponse,
     IndicatorCreate, IndicatorUpdate, IndicatorResponse,
@@ -152,8 +150,7 @@ def get_indicator(indicator_id: int, db: Session = Depends(get_db)):
 @router.get("/{indicator_id}/config")
 def get_indicator_config(
     indicator_id: int,
-    db: Session = Depends(get_db),
-    current_admin: Admin = Depends(get_current_admin)
+    db: Session = Depends(get_db)
 ):
     """Get indicator-specific configuration (e.g., MA200 multipliers)."""
     indicator = db.query(Indicator).filter(Indicator.id == indicator_id).first()

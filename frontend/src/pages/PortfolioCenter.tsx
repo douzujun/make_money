@@ -251,11 +251,6 @@ function todayIso() {
   return new Date().toISOString().slice(0, 10);
 }
 
-function authHeaders() {
-  const token = localStorage.getItem('token');
-  return { Authorization: `Bearer ${token}` };
-}
-
 function loadDraft(): Snapshot | null {
   try {
     const raw = localStorage.getItem(PORTFOLIO_DRAFT_KEY);
@@ -1017,7 +1012,7 @@ export default function PortfolioCenter() {
     setLoading(true);
     setError('');
     try {
-      const res = await fetch(`${API}/portfolio/latest`, { headers: authHeaders() });
+      const res = await fetch(`${API}/portfolio/latest`);
       if (!res.ok) throw new Error((await res.json()).detail ?? '加载持仓失败');
       const payload = await res.json();
       const draft = loadDraft();
@@ -1106,7 +1101,7 @@ export default function PortfolioCenter() {
     try {
       const res = await fetch(`${API}/portfolio/snapshots`, {
         method: 'POST',
-        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(snapshot),
       });
       if (!res.ok) throw new Error((await res.json()).detail ?? '保存失败');
@@ -1132,7 +1127,6 @@ export default function PortfolioCenter() {
     try {
       const res = await fetch(`${API}/portfolio/claude-review`, {
         method: 'POST',
-        headers: authHeaders(),
       });
       if (!res.ok) throw new Error((await res.json()).detail ?? 'Claude Code 审阅失败');
       const payload = await res.json();

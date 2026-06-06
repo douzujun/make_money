@@ -365,12 +365,14 @@ class PortfolioMarketConfirmationsTest(unittest.TestCase):
         ])
         try:
             self.add_asset_prices(session, "GC=F", [100 + idx for idx in range(25)], "Gold Futures")
-            self.add_asset_prices(session, "DX-Y.NYB", [110 - idx * 0.2 for idx in range(25)], "US Dollar Index")
+            self.add_asset_prices(session, "DTWEXBGS", [110 - idx * 0.2 for idx in range(25)], "Nominal Broad U.S. Dollar Index")
 
             confirmations = portfolio._bucket_market_confirmations(snapshot, session)
             gold = confirmations["gold"]
 
             self.assertEqual("supportive", gold["status"])
+            self.assertEqual("DTWEXBGS", gold["evidence"]["dollar_asset_id"])
+            self.assertEqual("FRED广义美元指数", gold["evidence"]["dollar_source_label"])
             self.assertEqual("人工确认", gold["permission_label"])
             self.assertEqual("manual_confirm", gold["operation_permission"])
             self.assertIn("20日均线", gold["summary"])
@@ -393,7 +395,27 @@ class PortfolioMarketConfirmationsTest(unittest.TestCase):
             self.assertEqual("neutral", gold["status"])
             self.assertEqual("黄金宏观信号不完整", gold["label"])
             self.assertEqual("manual_confirm", gold["operation_permission"])
-            self.assertIn("UUP代理均缺失", gold["summary"])
+            self.assertIn("FRED/DBnomics广义美元指数", gold["summary"])
+        finally:
+            session.close()
+
+    def test_gold_confirmation_prefers_fred_broad_dollar_index(self):
+        session, snapshot = self.make_snapshot([
+            {"name": "国泰黄金ETF联接A", "amount": 90000, "bucket": "gold"},
+            {"name": "现金替代测试", "amount": 50000, "bucket": "fragments"},
+        ])
+        try:
+            self.add_asset_prices(session, "GC=F", [100 + idx for idx in range(25)], "Gold Futures")
+            self.add_asset_prices(session, "DTWEXBGS", [110 - idx * 0.2 for idx in range(25)], "Nominal Broad U.S. Dollar Index")
+            self.add_asset_prices(session, "DX-Y.NYB", [100 + idx * 0.2 for idx in range(25)], "US Dollar Index")
+
+            confirmations = portfolio._bucket_market_confirmations(snapshot, session)
+            gold = confirmations["gold"]
+
+            self.assertEqual("supportive", gold["status"])
+            self.assertEqual("DTWEXBGS", gold["evidence"]["dollar_asset_id"])
+            self.assertEqual("official_macro", gold["evidence"]["dollar_data_quality"])
+            self.assertLess(gold["evidence"]["dollar_trend_5d_pct"], 0)
         finally:
             session.close()
 
