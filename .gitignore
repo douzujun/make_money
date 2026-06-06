@@ -31,6 +31,7 @@ logs/
 # Data (large files)
 data/*.db
 data/*.db.*
+backend/data/local_settings.json
 
 # Experiments (keep dir, ignore contents)
 db_scripts/binance_explore/skills/

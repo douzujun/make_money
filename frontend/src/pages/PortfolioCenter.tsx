@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   ArrowDownRight, ArrowUpRight, BadgeInfo, CheckCircle2, Coins, Gauge,
-  Layers, Loader2, PieChart, Plus, Save, Search, ShieldCheck, Target, Trash2,
+  Layers, Loader2, PieChart, Plus, Save, Search, Settings, ShieldCheck, Target, Trash2,
   WalletCards, Waves,
 } from 'lucide-react';
 
@@ -12,6 +12,7 @@ const PORTFOLIO_CODE_BOOK_KEY = 'portfolio-center-fund-code-book-v1';
 const PORTFOLIO_PROFIT_BOOK_KEY = 'portfolio-center-profit-book-v1';
 const PORTFOLIO_SECTOR_BOOK_KEY = 'portfolio-center-flow-sector-book-v1';
 const PORTFOLIO_BACKTEST_A_KEY = 'portfolio-center-backtest-a-v1';
+const PORTFOLIO_CLAUDE_REVIEW_KEY = 'portfolio-center-claude-review-v1';
 
 type BucketId =
   | 'a_share_core'
@@ -141,6 +142,47 @@ interface Recommendation {
     role: string;
   };
   formula: string;
+}
+
+interface ClaudeReviewConfig {
+  path: string;
+  default_path: string;
+  exists: boolean;
+  executable: boolean;
+  status: string;
+  config_file: string;
+}
+
+interface ClaudeReviewRisk {
+  title: string;
+  severity: 'low' | 'medium' | 'high' | string;
+  evidence: string;
+}
+
+interface ClaudeReviewOverride {
+  target: string;
+  suggestion: string;
+  reason: string;
+}
+
+interface ClaudeReviewResult {
+  risk_level: 'low' | 'medium' | 'high' | string;
+  trade_amount_adjustment: 'keep' | 'reduce_25' | 'reduce_50' | 'pause' | string;
+  can_execute_today: boolean;
+  top_risks: ClaudeReviewRisk[];
+  action_overrides: ClaudeReviewOverride[];
+  missing_data_warnings: string[];
+  summary: string;
+  raw_review?: string;
+}
+
+interface ClaudeReviewPayload {
+  review: string;
+  review_result: ClaudeReviewResult;
+  review_evidence?: Record<string, any>;
+  engine_signal: string;
+  claude_code_path: string;
+  note: string;
 }
 
 const BUCKETS: Record<BucketId, { name: string; color: string; role: string }> = {
@@ -408,6 +450,19 @@ function saveBacktestProxy(snapshot: Snapshot) {
   localStorage.setItem(PORTFOLIO_BACKTEST_A_KEY, JSON.stringify(buildBacktestProxy(snapshot)));
 }
 
+function loadClaudeReviewPayload(): ClaudeReviewPayload | null {
+  try {
+    const raw = localStorage.getItem(PORTFOLIO_CLAUDE_REVIEW_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveClaudeReviewPayload(payload: ClaudeReviewPayload) {
+  localStorage.setItem(PORTFOLIO_CLAUDE_REVIEW_KEY, JSON.stringify(payload));
+}
+
 function Card({
   children,
   style,
@@ -427,6 +482,84 @@ function Card({
       }}
     >
       {children}
+    </div>
+  );
+}
+
+function reviewRiskColor(level?: string) {
+  if (level === 'high' || level === 'pause') return '#dc2626';
+  if (level === 'medium' || level === 'reduce_50' || level === 'reduce_25') return '#d97706';
+  return '#16a34a';
+}
+
+function reviewAdjustmentLabel(value?: string) {
+  return {
+    keep: '维持公式金额',
+    reduce_25: '建议降 25%',
+    reduce_50: '建议降 50%',
+    pause: '建议暂停',
+  }[value ?? ''] ?? value ?? '—';
+}
+
+function ClaudeReviewPanel({ payload }: { payload: ClaudeReviewPayload }) {
+  const result = payload.review_result;
+  const riskColor = reviewRiskColor(result.risk_level);
+  const adjustColor = reviewRiskColor(result.trade_amount_adjustment);
+  return (
+    <div style={{ marginTop: 12, display: 'grid', gap: 10 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
+        <div style={{ padding: 10, borderRadius: 10, background: `${riskColor}12`, border: `1px solid ${riskColor}33` }}>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>总体风险</div>
+          <div style={{ fontSize: 15, fontWeight: 850, color: riskColor }}>{result.risk_level}</div>
+        </div>
+        <div style={{ padding: 10, borderRadius: 10, background: `${adjustColor}12`, border: `1px solid ${adjustColor}33` }}>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>交易金额覆盖</div>
+          <div style={{ fontSize: 15, fontWeight: 850, color: adjustColor }}>{reviewAdjustmentLabel(result.trade_amount_adjustment)}</div>
+        </div>
+        <div style={{ padding: 10, borderRadius: 10, background: result.can_execute_today ? '#16a34a12' : '#dc262612', border: `1px solid ${result.can_execute_today ? '#16a34a33' : '#dc262633'}` }}>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>今日执行</div>
+          <div style={{ fontSize: 15, fontWeight: 850, color: result.can_execute_today ? '#16a34a' : '#dc2626' }}>{result.can_execute_today ? '允许' : '暂停/人工确认'}</div>
+        </div>
+      </div>
+      <div style={{ padding: 12, borderRadius: 10, background: 'var(--bg-primary)', border: '1px solid var(--border-color)' }}>
+        <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 6 }}>风控摘要</div>
+        <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.6 }}>{result.summary || '暂无摘要'}</div>
+      </div>
+      {result.top_risks?.length > 0 && (
+        <div style={{ padding: 12, borderRadius: 10, background: 'var(--bg-primary)', border: '1px solid var(--border-color)' }}>
+          <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 8 }}>主要风险</div>
+          {result.top_risks.slice(0, 3).map((risk, idx) => (
+            <div key={`${risk.title}-${idx}`} style={{ marginBottom: idx === result.top_risks.length - 1 ? 0 : 8 }}>
+              <div style={{ fontSize: 12, fontWeight: 800, color: reviewRiskColor(risk.severity) }}>{risk.title}</div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5 }}>{risk.evidence}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {result.action_overrides?.length > 0 && (
+        <div style={{ padding: 12, borderRadius: 10, background: 'var(--bg-primary)', border: '1px solid var(--border-color)' }}>
+          <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 8 }}>覆盖建议</div>
+          {result.action_overrides.slice(0, 4).map((item, idx) => (
+            <div key={`${item.target}-${idx}`} style={{ fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.5, marginBottom: 6 }}>
+              <strong>{item.target}</strong> · {item.suggestion}：{item.reason}
+            </div>
+          ))}
+        </div>
+      )}
+      {result.missing_data_warnings?.length > 0 && (
+        <div style={{ padding: 12, borderRadius: 10, background: '#d9770610', border: '1px solid #d9770633' }}>
+          <div style={{ fontSize: 12, fontWeight: 800, color: '#d97706', marginBottom: 8 }}>数据缺口</div>
+          {result.missing_data_warnings.slice(0, 5).map((item, idx) => (
+            <div key={`${item}-${idx}`} style={{ fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.5 }}>• {item}</div>
+          ))}
+        </div>
+      )}
+      <details style={{ padding: 12, borderRadius: 10, background: 'var(--bg-primary)', border: '1px solid var(--border-color)' }}>
+        <summary style={{ fontSize: 12, fontWeight: 800, cursor: 'pointer' }}>原始 Claude 审阅</summary>
+        <div style={{ marginTop: 10, whiteSpace: 'pre-wrap', fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.6 }}>
+          {payload.review}
+        </div>
+      </details>
     </div>
   );
 }
@@ -1004,7 +1137,10 @@ export default function PortfolioCenter() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [reviewing, setReviewing] = useState(false);
-  const [claudeReview, setClaudeReview] = useState('');
+  const [claudeReviewPayload, setClaudeReviewPayload] = useState<ClaudeReviewPayload | null>(() => loadClaudeReviewPayload());
+  const [claudeConfig, setClaudeConfig] = useState<ClaudeReviewConfig | null>(null);
+  const [claudePathDraft, setClaudePathDraft] = useState('');
+  const [savingClaudeConfig, setSavingClaudeConfig] = useState(false);
   const [error, setError] = useState('');
   const [savedText, setSavedText] = useState('');
 
@@ -1030,8 +1166,21 @@ export default function PortfolioCenter() {
     }
   };
 
+  const loadClaudeConfig = async () => {
+    try {
+      const res = await fetch(`${API}/portfolio/claude-review/config`);
+      if (!res.ok) throw new Error((await res.json()).detail ?? '加载 Claude Code 配置失败');
+      const payload = await res.json();
+      setClaudeConfig(payload);
+      setClaudePathDraft(payload.path ?? '');
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   useEffect(() => {
     loadLatest();
+    loadClaudeConfig();
   }, []);
 
   const updateSnapshot = (patch: Partial<Snapshot>) => {
@@ -1123,18 +1272,44 @@ export default function PortfolioCenter() {
   const runClaudeReview = async () => {
     setReviewing(true);
     setError('');
-    setClaudeReview('');
+    setClaudeReviewPayload(null);
     try {
       const res = await fetch(`${API}/portfolio/claude-review`, {
         method: 'POST',
       });
       if (!res.ok) throw new Error((await res.json()).detail ?? 'Claude Code 审阅失败');
       const payload = await res.json();
-      setClaudeReview(payload.review);
+      setClaudeReviewPayload(payload);
+      saveClaudeReviewPayload(payload);
+      if (payload.claude_code_path) {
+        setClaudePathDraft(payload.claude_code_path);
+      }
     } catch (e) {
       setError(String(e));
     } finally {
       setReviewing(false);
+    }
+  };
+
+  const saveClaudeConfig = async () => {
+    setSavingClaudeConfig(true);
+    setError('');
+    setSavedText('');
+    try {
+      const res = await fetch(`${API}/portfolio/claude-review/config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: claudePathDraft }),
+      });
+      if (!res.ok) throw new Error((await res.json()).detail ?? '保存 Claude Code 路径失败');
+      const payload = await res.json();
+      setClaudeConfig(payload);
+      setClaudePathDraft(payload.path ?? '');
+      setSavedText(payload.executable ? 'Claude Code 路径已保存，可执行' : 'Claude Code 路径已保存，但当前不可执行');
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSavingClaudeConfig(false);
     }
   };
 
@@ -1406,6 +1581,64 @@ export default function PortfolioCenter() {
                 风控审阅
               </button>
             </div>
+            <div style={{ marginBottom: 12, padding: 10, borderRadius: 10, background: 'var(--bg-primary)', border: '1px solid var(--border-color)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 8 }}>
+                <Settings size={13} color="#64748b" />
+                <span style={{ fontSize: 12, fontWeight: 750, color: 'var(--text-secondary)' }}>本地 Claude Code 路径</span>
+                {claudeConfig && (
+                  <span style={{
+                    marginLeft: 'auto',
+                    fontSize: 11,
+                    fontWeight: 750,
+                    color: claudeConfig.executable ? '#16a34a' : '#d97706',
+                  }}>
+                    {claudeConfig.executable ? '可执行' : claudeConfig.exists ? '不可执行' : '未找到'}
+                  </span>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <input
+                  value={claudePathDraft}
+                  onChange={e => setClaudePathDraft(e.target.value)}
+                  placeholder={claudeConfig?.default_path || '/Users/.../ducc'}
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    height: 32,
+                    borderRadius: 8,
+                    border: '1px solid var(--border-color)',
+                    background: 'var(--bg-secondary)',
+                    color: 'var(--text-primary)',
+                    padding: '0 10px',
+                    fontSize: 12,
+                    fontFamily: 'monospace',
+                  }}
+                />
+                <button
+                  onClick={saveClaudeConfig}
+                  disabled={savingClaudeConfig}
+                  title="保存本机 Claude Code 路径"
+                  style={{
+                    width: 34,
+                    height: 32,
+                    borderRadius: 8,
+                    border: '1px solid #16a34a33',
+                    background: '#16a34a12',
+                    color: '#16a34a',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    cursor: savingClaudeConfig ? 'not-allowed' : 'pointer',
+                    flexShrink: 0,
+                  }}
+                >
+                  {savingClaudeConfig ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={14} />}
+                </button>
+              </div>
+              <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+                留空会恢复默认路径；配置只保存在本机，不会提交到代码库。
+              </div>
+            </div>
             {[
               `风格：${data.policy.style}`,
               `慢调仓系数：${Number(data.policy.slow_factor) * 100}%`,
@@ -1421,11 +1654,7 @@ export default function PortfolioCenter() {
                 {item}
               </div>
             ))}
-            {claudeReview && (
-              <div style={{ marginTop: 12, padding: 12, borderRadius: 10, background: 'var(--bg-primary)', border: '1px solid var(--border-color)', whiteSpace: 'pre-wrap', fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-                {claudeReview}
-              </div>
-            )}
+            {claudeReviewPayload && <ClaudeReviewPanel payload={claudeReviewPayload} />}
           </div>
         </div>
       </Card>

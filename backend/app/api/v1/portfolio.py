@@ -1,15 +1,18 @@
 """Portfolio snapshot and conservative rebalance recommendation API."""
 import json
+import os
 import re
 import subprocess
 import time
 import urllib.error
 import urllib.request
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -21,10 +24,14 @@ from app.models.sector_flow import SectorFundFlow
 
 router = APIRouter(prefix="/portfolio", tags=["portfolio"])
 
-DUCC_BIN = "/Users/douzujun/.comate/baidu-cc/bin/ducc"
+DEFAULT_DUCC_BIN = "/Users/douzujun/.comate/baidu-cc/bin/ducc"
+LOCAL_SETTINGS_PATH = Path(__file__).resolve().parents[3] / "data" / "local_settings.json"
 INTRADAY_MAX_ACTION = 3000.0
 INTRADAY_TIMEOUT = 4
 ESTIMATE_CACHE_TTL = 180
+MAX_REVIEW_ACTIONS = 10
+MAX_REVIEW_FUNDS = 20
+MAX_REVIEW_SECTORS = 20
 _estimate_cache: Dict[str, Dict] = {}
 
 GOLD_ASSET_ID = "GC=F"
@@ -222,6 +229,10 @@ class SnapshotIn(BaseModel):
     reserve_floor_amount: float = Field(default=80000, ge=0)
     note: Optional[str] = None
     holdings: List[HoldingIn]
+
+
+class ClaudeReviewConfigIn(BaseModel):
+    path: str = Field(default="", description="本地 Claude Code / ducc 可执行文件路径")
 
 
 def _snapshot_payload(snapshot: PortfolioSnapshot) -> Dict:
@@ -1322,23 +1333,397 @@ def _sector_options(db: Session) -> List[str]:
     return [row[0] for row in rows if row[0]]
 
 
-def _build_review_prompt(recommendation: Dict) -> str:
-    compact = {
+def _load_local_settings() -> Dict[str, Any]:
+    try:
+        if LOCAL_SETTINGS_PATH.exists():
+            return json.loads(LOCAL_SETTINGS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {}
+
+
+def _save_local_settings(settings: Dict[str, Any]) -> None:
+    LOCAL_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LOCAL_SETTINGS_PATH.write_text(
+        json.dumps(settings, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _claude_review_bin() -> str:
+    configured = (_load_local_settings().get("claude_code_path") or "").strip()
+    return configured or DEFAULT_DUCC_BIN
+
+
+def _claude_review_config_payload(path: Optional[str] = None) -> Dict[str, Any]:
+    selected = (path if path is not None else _claude_review_bin()).strip()
+    exists = bool(selected) and os.path.exists(selected)
+    executable = exists and os.access(selected, os.X_OK)
+    return {
+        "path": selected,
+        "default_path": DEFAULT_DUCC_BIN,
+        "exists": exists,
+        "executable": executable,
+        "status": "ready" if executable else "missing",
+        "config_file": str(LOCAL_SETTINGS_PATH),
+    }
+
+
+def _compact_for_review(value: Any, max_list: int = 20, depth: int = 0) -> Any:
+    if depth > 6:
+        return "..."
+    if isinstance(value, dict):
+        return {
+            str(k): _compact_for_review(v, max_list=max_list, depth=depth + 1)
+            for k, v in value.items()
+            if v is not None
+        }
+    if isinstance(value, list):
+        trimmed = value[:max_list]
+        result = [_compact_for_review(item, max_list=max_list, depth=depth + 1) for item in trimmed]
+        if len(value) > max_list:
+            result.append({"truncated_count": len(value) - max_list})
+        return result
+    if isinstance(value, float):
+        return round(value, 4)
+    if isinstance(value, str) and len(value) > 500:
+        return value[:500] + "...[truncated]"
+    return value
+
+
+def _latest_price_summary(db: Session, asset_id: str) -> Dict[str, Any]:
+    rows = _price_history(db, asset_id, 25)
+    if not rows:
+        return {"asset_id": asset_id, "available": False, "days": 0}
+    latest = rows[-1]
+    previous = rows[-6] if len(rows) >= 6 else None
+    trend_5d = (
+        ((latest.close - previous.close) / previous.close) * 100
+        if previous and previous.close
+        else None
+    )
+    return {
+        "asset_id": asset_id,
+        "available": True,
+        "days": len(rows),
+        "date": latest.date.isoformat(),
+        "close": round(latest.close, 4),
+        "trend_5d_pct": round(trend_5d, 2) if trend_5d is not None else None,
+        "source": latest.source,
+    }
+
+
+def _latest_big_money_evidence(db: Session, limit: int = 5) -> Dict[str, Any]:
+    rows = (
+        db.query(BigMoneySignal)
+        .order_by(BigMoneySignal.date.desc(), BigMoneySignal.id.desc())
+        .limit(limit)
+        .all()
+    )
+    if not rows:
+        return {"available": False, "latest": None, "recent": []}
+    return {
+        "available": True,
+        "latest": {
+            "date": rows[0].date.isoformat(),
+            "signal": rows[0].signal,
+            "signal_label": rows[0].signal_label,
+            "watch_signal": rows[0].watch_signal,
+            "watch_label": rows[0].watch_label,
+            "confidence": rows[0].confidence,
+            "basket_delta_share": rows[0].basket_delta_share,
+            "estimated_amount": rows[0].estimated_amount,
+            "z_score": rows[0].z_score,
+            "market_drawdown_20": rows[0].market_drawdown_20,
+            "positive_etf_count": rows[0].positive_etf_count,
+            "negative_etf_count": rows[0].negative_etf_count,
+            "data_quality": rows[0].data_quality,
+            "evidence": rows[0].evidence or {},
+        },
+        "recent": [
+            {
+                "date": row.date.isoformat(),
+                "signal_label": row.signal_label,
+                "watch_label": row.watch_label,
+                "confidence": row.confidence,
+                "estimated_amount": row.estimated_amount,
+                "z_score": row.z_score,
+                "data_quality": row.data_quality,
+            }
+            for row in rows
+        ],
+    }
+
+
+def _sector_signal_evidence(snapshot: PortfolioSnapshot, db: Session) -> Dict[str, Any]:
+    from collections import defaultdict
+    from app.api.v1 import sector_flow
+
+    sector_names = sorted({
+        name
+        for h in snapshot.holdings
+        for name in [_normalise_sector_name(h.flow_sector_name) or _match_sector_name(h.name, db)]
+        if name
+    })
+    if not sector_names:
+        return {"matched_sectors": [], "signals": [], "backtests": {}, "data_note": "持仓未匹配到行业资金流"}
+
+    cutoff = date.today() - timedelta(days=sector_flow.SIGNAL_LOOKBACK_DAYS)
+    rows = (
+        db.query(SectorFundFlow)
+        .filter(
+            SectorFundFlow.sector_type == "industry",
+            SectorFundFlow.sector_name.in_(sector_names),
+            SectorFundFlow.date >= cutoff,
+        )
+        .order_by(SectorFundFlow.sector_name, SectorFundFlow.date.desc())
+        .all()
+    )
+    grouped: Dict[str, List[SectorFundFlow]] = defaultdict(list)
+    for row in rows:
+        grouped[row.sector_name].append(row)
+    signal_grouped = {
+        name: rows_desc
+        for name, rows_desc in grouped.items()
+        if len(rows_desc) >= sector_flow.MIN_SIGNAL_ROWS
+    }
+    backtests = {
+        horizon: sector_flow._calc_backtest_for_horizon(signal_grouped, horizon, sector_flow.BACKTEST_RISK_FACTOR)
+        for horizon in sector_flow.HORIZON_META
+    } if signal_grouped else {}
+
+    signals = []
+    for name, rows_desc in signal_grouped.items():
+        sig = sector_flow._calc_signal(rows_desc, sector_flow.BACKTEST_RISK_FACTOR)
+        action = sector_flow._calc_signal_action(sig, rows_desc, backtests)
+        latest = rows_desc[0]
+        signals.append({
+            "sector_name": name,
+            "latest_date": latest.date.isoformat(),
+            "latest_change_pct": latest.change_pct,
+            "latest_net_inflow_main": latest.net_inflow_main,
+            "history_days": len(rows_desc),
+            "score": sig.get("score"),
+            "horizons": sig.get("horizons"),
+            "signal_action": action,
+        })
+    signals.sort(key=lambda item: abs(item.get("latest_net_inflow_main") or 0), reverse=True)
+    return {
+        "matched_sectors": sector_names,
+        "signals": signals[:MAX_REVIEW_SECTORS],
+        "backtests": backtests,
+        "data_note": "行业信号仅包含当前持仓匹配行业；回测为历史每日信号与未来收益摘要。",
+    }
+
+
+def _backtest_cache_summary(db: Session) -> Dict[str, Any]:
+    try:
+        from app.api.v1.backtest import BACKTEST_ASSETS
+        from app.models.backtest import EtfPriceCache
+    except Exception:
+        return {"available": False, "message": "回测模块不可用"}
+
+    rows = []
+    try:
+        for asset in BACKTEST_ASSETS:
+            symbol = asset["symbol"]
+            if symbol == "CASH":
+                rows.append({"symbol": symbol, "name": asset["name"], "cached_rows": 9999})
+                continue
+            count = db.query(EtfPriceCache).filter(EtfPriceCache.symbol == symbol).count()
+            latest = (
+                db.query(EtfPriceCache)
+                .filter(EtfPriceCache.symbol == symbol)
+                .order_by(EtfPriceCache.date.desc())
+                .first()
+            )
+            rows.append({
+                "symbol": symbol,
+                "name": asset["name"],
+                "cached_rows": count,
+                "latest_date": latest.date.isoformat() if latest else None,
+            })
+    except SQLAlchemyError as exc:
+        db.rollback()
+        return {"available": False, "message": f"回测缓存读取失败: {exc.__class__.__name__}"}
+    return {
+        "available": any(row["cached_rows"] > 0 for row in rows if row["symbol"] != "CASH"),
+        "price_cache": rows,
+        "note": "第一版提供回测数据覆盖情况和行业信号回测摘要；不在风控审阅中传完整净值曲线。",
+    }
+
+
+def _fund_review_priority(item: Dict[str, Any]) -> tuple:
+    action_rank = {
+        "intraday_trim_watch": 4,
+        "clear_watch": 4,
+        "intraday_add_watch": 3,
+        "hold": 1,
+    }.get(item.get("recommendation"), 2)
+    missing_rank = 1 if item.get("market_confirmation", {}).get("status") == "unavailable" else 0
+    profit_rate = abs(item.get("profit_rate") or 0)
+    return (action_rank, item.get("amount") or 0, profit_rate, missing_rank)
+
+
+def _build_data_quality(recommendation: Dict, sector_evidence: Dict, backtest_summary: Dict) -> Dict[str, Any]:
+    missing = []
+    fallbacks = []
+    stale = []
+    blocking = []
+    snapshot = recommendation.get("snapshot") or {}
+    holdings = snapshot.get("holdings") or []
+    for holding in holdings:
+        if not holding.get("fund_code"):
+            missing.append(f"{holding.get('name')} 缺基金代码，盘中估值可能不可用")
+        if holding.get("bucket") in ("themes", "commodities", "a_share_core") and not holding.get("flow_sector_name"):
+            missing.append(f"{holding.get('name')} 未手动确认资金流行业")
+
+    for bucket, confirmation in (recommendation.get("market_confirmations") or {}).items():
+        status = confirmation.get("status")
+        if status == "unavailable":
+            missing.append(f"{bucket}: {confirmation.get('label')}")
+        evidence = confirmation.get("evidence") or {}
+        quality = evidence.get("dollar_data_quality")
+        if quality in ("fallback", "proxy"):
+            fallbacks.append(f"黄金美元确认使用 {evidence.get('dollar_source_label')} ({quality})")
+        if evidence.get("dollar_days") is not None and evidence.get("dollar_days") < 6:
+            blocking.append("黄金美元确认样本不足")
+        if confirmation.get("date"):
+            try:
+                age = (date.today() - date.fromisoformat(confirmation["date"])).days
+                if age > 5:
+                    stale.append(f"{bucket}: 市场确认日期 {confirmation['date']}，距今 {age} 天")
+            except ValueError:
+                pass
+
+    for horizon, backtest in (sector_evidence.get("backtests") or {}).items():
+        samples = backtest.get("bullish", {}).get("samples", 0)
+        if samples and samples < 20:
+            missing.append(f"{horizon} 行业信号回测样本偏少：{samples}")
+
+    if not backtest_summary.get("available"):
+        missing.append("组合回测ETF价格缓存不足，无法提供组合回测摘要")
+
+    issue_count = len(missing) + len(fallbacks) + len(stale) + len(blocking)
+    overall = "good" if issue_count == 0 else "partial" if issue_count <= 8 and not blocking else "poor"
+    return {
+        "overall": overall,
+        "missing": missing[:30],
+        "fallbacks": fallbacks[:20],
+        "stale": stale[:20],
+        "blocking_warnings": blocking[:20],
+    }
+
+
+def _build_review_evidence(recommendation: Dict, snapshot: PortfolioSnapshot, db: Session) -> Dict[str, Any]:
+    snapshot_payload = recommendation["snapshot"]
+    fund_recommendations = sorted(
+        recommendation.get("fund_recommendations") or [],
+        key=_fund_review_priority,
+        reverse=True,
+    )[:MAX_REVIEW_FUNDS]
+    sector_evidence = _sector_signal_evidence(snapshot, db)
+    backtest_summary = _backtest_cache_summary(db)
+    evidence = {
         "total_assets": recommendation["total_assets"],
         "cash_budget": recommendation["cash_budget"],
+        "daily_add_cap": recommendation["daily_add_cap"],
+        "daily_trim_cap": recommendation["daily_trim_cap"],
         "signal_label": recommendation["signal_label"],
         "policy": recommendation["policy"],
         "bucket_rows": recommendation["bucket_rows"],
-        "actions": recommendation["actions"][:10],
+        "actions": recommendation["actions"][:MAX_REVIEW_ACTIONS],
+        "market_confirmations": recommendation["market_confirmations"],
+        "holdings": snapshot_payload.get("holdings", [])[:MAX_REVIEW_FUNDS],
+        "fund_recommendations": fund_recommendations,
+        "macro_price_evidence": {
+            "gold": _latest_price_summary(db, GOLD_ASSET_ID),
+            "dollar": _latest_price_summary(db, DOLLAR_INDEX_ASSET_ID),
+            "dollar_fallbacks": [
+                _latest_price_summary(db, item["asset_id"])
+                for item in DOLLAR_CONFIRMATION_ASSETS
+                if item["asset_id"] != DOLLAR_INDEX_ASSET_ID
+            ],
+        },
+        "big_money": _latest_big_money_evidence(db),
+        "sector_flow": sector_evidence,
+        "backtest": backtest_summary,
+        "limits": {
+            "actions": MAX_REVIEW_ACTIONS,
+            "fund_recommendations": MAX_REVIEW_FUNDS,
+            "sector_evidence": MAX_REVIEW_SECTORS,
+            "network_policy": "Claude Code 不允许联网或调用外部工具；只审阅本地证据包。",
+        },
         "formula": recommendation["formula"],
     }
+    evidence["data_quality"] = _build_data_quality(recommendation, sector_evidence, backtest_summary)
+    return _compact_for_review(evidence, max_list=MAX_REVIEW_FUNDS)
+
+
+def _build_review_prompt(evidence: Dict) -> str:
     return (
-        "你是投资组合风控审阅员。请审阅下面由公式引擎生成的稳健慢调仓建议。"
-        "不要输出具体基金标的买卖建议，不要替代公式引擎下指令。"
-        "请只输出：1）三点主要风险；2）三点改进建议；3）是否需要降低当天交易金额。"
-        "要求中文、简洁、可执行。\n\n"
-        + json.dumps(compact, ensure_ascii=False, indent=2)
+        "你是投资组合全证据风控审阅员。你只能审阅下面的本地证据包，禁止联网，禁止调用工具，禁止臆造外部数据。"
+        "公式引擎仍是最终交易建议来源；你只能给风控覆盖建议，不得直接下具体基金买卖指令。"
+        "如果关键数据缺失、样本不足、证据冲突，必须降低交易金额或建议暂停。"
+        "请只输出一个合法 JSON 对象，不要 Markdown，不要代码块。JSON schema："
+        "{"
+        "\"risk_level\":\"low|medium|high\","
+        "\"trade_amount_adjustment\":\"keep|reduce_25|reduce_50|pause\","
+        "\"can_execute_today\":true,"
+        "\"top_risks\":[{\"title\":\"\",\"severity\":\"low|medium|high\",\"evidence\":\"\"}],"
+        "\"action_overrides\":[{\"target\":\"\",\"suggestion\":\"keep|reduce_amount|pause|wait_confirm\",\"reason\":\"\"}],"
+        "\"missing_data_warnings\":[\"\"],"
+        "\"summary\":\"\""
+        "}。\n\n本地证据包：\n"
+        + json.dumps(evidence, ensure_ascii=False, indent=2)
     )
+
+
+def _default_review_result(raw: str, evidence: Dict) -> Dict[str, Any]:
+    quality = (evidence.get("data_quality") or {}).get("overall")
+    return {
+        "risk_level": "high" if quality == "poor" else "medium",
+        "trade_amount_adjustment": "reduce_50" if quality == "poor" else "reduce_25",
+        "can_execute_today": quality != "poor",
+        "top_risks": [{
+            "title": "Claude 风控输出未能解析为结构化 JSON",
+            "severity": "medium",
+            "evidence": "已保留原始审阅文本，请人工阅读后再操作。",
+        }],
+        "action_overrides": [],
+        "missing_data_warnings": (evidence.get("data_quality") or {}).get("missing", [])[:5],
+        "summary": "结构化解析失败，默认按保守风控处理。",
+        "raw_review": raw,
+    }
+
+
+def _parse_review_result(raw: str, evidence: Dict) -> Dict[str, Any]:
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", text, flags=re.S)
+        if not match:
+            return _default_review_result(raw, evidence)
+        try:
+            parsed = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return _default_review_result(raw, evidence)
+    if not isinstance(parsed, dict):
+        return _default_review_result(raw, evidence)
+
+    parsed.setdefault("risk_level", "medium")
+    parsed.setdefault("trade_amount_adjustment", "reduce_25")
+    parsed.setdefault("can_execute_today", parsed["trade_amount_adjustment"] != "pause")
+    parsed.setdefault("top_risks", [])
+    parsed.setdefault("action_overrides", [])
+    parsed.setdefault("missing_data_warnings", [])
+    parsed.setdefault("summary", "")
+    parsed["raw_review"] = raw
+    return parsed
 
 
 @router.get("/latest")
@@ -1413,15 +1798,34 @@ def list_snapshots(limit: int = 30, db: Session = Depends(get_db)):
     }
 
 
+@router.get("/claude-review/config")
+def get_claude_review_config():
+    return _claude_review_config_payload()
+
+
+@router.put("/claude-review/config")
+def save_claude_review_config(payload: ClaudeReviewConfigIn):
+    path = payload.path.strip()
+    settings = _load_local_settings()
+    if path:
+        settings["claude_code_path"] = path
+    else:
+        settings.pop("claude_code_path", None)
+    _save_local_settings(settings)
+    return _claude_review_config_payload(path or DEFAULT_DUCC_BIN)
+
+
 @router.post("/claude-review")
 def claude_review(db: Session = Depends(get_db)):
     snapshot = _ensure_snapshot(db)
     recommendation = _recommend(snapshot, db)
-    prompt = _build_review_prompt(recommendation)
+    evidence = _build_review_evidence(recommendation, snapshot, db)
+    prompt = _build_review_prompt(evidence)
+    claude_bin = _claude_review_bin()
     try:
         result = subprocess.run(
             [
-                DUCC_BIN,
+                claude_bin,
                 "--print",
                 "--permission-mode",
                 "dontAsk",
@@ -1435,7 +1839,9 @@ def claude_review(db: Session = Depends(get_db)):
             check=False,
         )
     except FileNotFoundError:
-        raise HTTPException(503, "ducc 未找到，无法生成 Claude Code 风控审阅")
+        raise HTTPException(503, f"Claude Code 未找到：{claude_bin}")
+    except PermissionError:
+        raise HTTPException(503, f"Claude Code 不可执行，请检查权限：{claude_bin}")
     except subprocess.TimeoutExpired:
         raise HTTPException(504, "Claude Code 风控审阅超时")
 
@@ -1443,8 +1849,13 @@ def claude_review(db: Session = Depends(get_db)):
         detail = result.stderr.strip() or result.stdout.strip() or "Claude Code 风控审阅失败"
         raise HTTPException(502, detail)
 
+    raw_review = result.stdout.strip()
+    review_result = _parse_review_result(raw_review, evidence)
     return {
-        "review": result.stdout.strip(),
+        "review": raw_review,
+        "review_result": review_result,
+        "review_evidence": evidence,
         "engine_signal": recommendation["signal_label"],
+        "claude_code_path": claude_bin,
         "note": "Claude Code 仅作为二次风控审阅；最终操作建议仍以公式引擎和你的风险约束为准。",
     }
