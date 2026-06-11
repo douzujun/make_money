@@ -562,6 +562,36 @@ def backfill_etf_shares(days: int = 30) -> Dict[str, int]:
     return total
 
 
+def refresh_recent_etf_shares(days: int = 5, end_date: Optional[date] = None) -> Dict[str, Any]:
+    """
+    Refresh recent trading-day ETF share snapshots.
+
+    SSE ETF share snapshots are commonly published with a delay. Fetching only
+    today during a morning scheduler run can miss the previous trading day, so
+    refresh a small recent window and let the signal engine use the latest
+    successfully saved ETF date.
+    """
+    from datetime import timedelta
+
+    total: Dict[str, Any] = {
+        "inserted": 0,
+        "updated": 0,
+        "errors": 0,
+        "attempted_dates": [],
+    }
+    end = end_date or date.today()
+    for i in range(days):
+        d = end - timedelta(days=i)
+        if d.weekday() >= 5:
+            continue
+        total["attempted_dates"].append(d.isoformat())
+        r = fetch_etf_shares_for_date(d.isoformat())
+        for key in ("inserted", "updated", "errors"):
+            total[key] += r.get(key, 0)
+    logger.info("[ETFShare] Recent refresh %d days done: %s", days, total)
+    return total
+
+
 # ── Backtest ETF price cache ──────────────────────────────────────────────────
 
 BACKTEST_ETFS = {

@@ -327,11 +327,11 @@ class DataScheduler:
         results: Dict[str, Any] = {}
 
         try:
-            from app.fetchers.akshare_fetcher import fetch_northbound_today, fetch_etf_shares_for_date
+            from app.fetchers.akshare_fetcher import fetch_northbound_today, refresh_recent_etf_shares
             from app.services.big_money_signal import calculate_latest_signal
 
             results["northbound"] = fetch_northbound_today()
-            results["etf_shares"] = fetch_etf_shares_for_date()
+            results["etf_shares"] = refresh_recent_etf_shares(days=5)
             results["signal"] = calculate_latest_signal()
             status = "success" if results.get("signal") else "partial"
             self._finish_run_log(run_log, status, results)
